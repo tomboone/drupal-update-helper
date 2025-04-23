@@ -138,6 +138,24 @@ handle_no_updates() {
 
 # --- Main Script Logic ---
 main() {
+    echo "--- Debug Info ---"
+    echo "User: $(whoami)"
+    echo "Shell: $SHELL"
+    echo "Bash Version: $BASH_VERSION" # Will be empty if not running bash
+    echo -n "Is stdin a TTY? "
+    if [[ -t 0 ]]; then
+        echo "Yes"
+    else
+        echo "No"
+    fi
+    echo -n "Regex Test ( =~ ): "
+    if [[ "test" =~ ^t ]]; then
+         echo "Supported"
+    else
+         echo "FAILED"
+    fi
+    echo "--- End Debug Info ---"
+
     # --- Sanity Checks ---
     check_command "git"
     check_command "composer"
@@ -241,18 +259,32 @@ main() {
         echo "Current version: ${current_version}"
         echo "Available:       ${latest_version}"
 
-        # Check if pinned
+        # --- ADD DEBUG for is_pinned ---
+        echo -n "DEBUG: Checking if '$package_name' is pinned... "
         if is_pinned "$package_name"; then
+            # This branch means is_pinned returned 0 (true)
+            echo "Yes (is_pinned returned true, skipping before prompt)" # Debug message
             echo "Status:          Pinned (ignored)."
-            continue # Move to the next package in the loop
+            continue
+        else
+            # This branch means is_pinned returned non-zero (false)
+            echo "No (is_pinned returned false, proceeding to prompt)" # Debug message
         fi
+        # --- END DEBUG for is_pinned ---
 
         # Confirm update
         local confirm_update
-        read -r -p "Do you want to update this package? (y/N): " confirm_update
+        # Explicitly read from the terminal device, bypassing loop's stdin redirection
+        # ADD "< /dev/tty" to the end of this line:
+        read -r -p "Do you want to update this package? (y/N): " confirm_update < /dev/tty
+
+        # Optional Debug line (can be kept or removed)
+        # echo "DEBUG: Input read was: ->${confirm_update}<-"
+
+        # Check if the input does NOT match exactly 'y' or 'Y'
         if [[ ! "$confirm_update" =~ ^[Yy]$ ]]; then
             echo "Status:          Skipped by user."
-            continue # Move to the next package in the loop
+            continue
         fi
 
         # --- Perform Update ---
