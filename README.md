@@ -1,5 +1,7 @@
 # Drupal Interactive Update Helper
 
+**DO NOT USE THIS TOOL. This is a work-in-progress and not yet ready for production use.**
+
 A command-line tool to interactively update Composer dependencies for a Drupal project one by one, committing each update separately.
 
 This script helps bridge the gap between manually updating every single package and blindly running `composer update`. It streamlines the process while maintaining a granular commit history suitable for review and safe deployment.
