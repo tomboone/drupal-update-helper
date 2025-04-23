@@ -138,24 +138,6 @@ handle_no_updates() {
 
 # --- Main Script Logic ---
 main() {
-    echo "--- Debug Info ---"
-    echo "User: $(whoami)"
-    echo "Shell: $SHELL"
-    echo "Bash Version: $BASH_VERSION" # Will be empty if not running bash
-    echo -n "Is stdin a TTY? "
-    if [[ -t 0 ]]; then
-        echo "Yes"
-    else
-        echo "No"
-    fi
-    echo -n "Regex Test ( =~ ): "
-    if [[ "test" =~ ^t ]]; then
-         echo "Supported"
-    else
-         echo "FAILED"
-    fi
-    echo "--- End Debug Info ---"
-
     # --- Sanity Checks ---
     check_command "git"
     check_command "composer"
