@@ -7,14 +7,17 @@
 #   Checks for outdated direct Composer dependencies in a Drupal project,
 #   creates a dated update branch, then interactively asks the user whether
 #   to update each package one by one. Skips packages listed in a ignore file.
-#   Commits each successful update individually. Finally, asks whether to push
-#   the update branch.
+#   Commits each successful update individually (including code changes).
+#   Finally, asks whether to push the update branch.
 #
 # Prerequisites:
-#   - bash (v4+ recommended for process substitution behavior)
+#   - bash (v4+ recommended)
 #   - git
 #   - composer (v1 or v2)
 #   - jq (command-line JSON processor)
+#   - Must be run from the project root directory.
+#   - Requires an interactive terminal (TTY), especially if run via Docker.
+#     (Use `docker exec -it ...` or `docker compose exec -it ...`)
 #
 # Configuration File:
 #   Create a file named '.drupal-updater-ignore' in the project root.
@@ -22,35 +25,23 @@
 #   Lines starting with # and empty lines are ignored.
 #
 # Usage:
-#   Place this script somewhere accessible. Make it executable (chmod +x).
-#   Run it from the root directory of your Drupal project.
-#   Example: ./drupal-update-helper.sh
-#
-#   If packaged via Composer `bin`: vendor/bin/drupal-update-helper.sh
+#   From project root: vendor/bin/drupal-update-helper
 # -----------------------------------------------------------------------------
 
 # --- Configuration ---
-# Name of the file in the project root containing packages to ignore
 readonly CONFIG_FILE=".drupal-updater-ignore"
-# Prefix for the update branch name
 readonly BRANCH_PREFIX="update"
-# Git remote name to push to
 readonly REMOTE_NAME="origin"
 # --- End Configuration ---
 
 # --- Global Variables ---
-# Populated by load_pinned_packages()
 PINNED_PACKAGES=()
-# Populated after checking git status
 CURRENT_BRANCH=""
-# Counter for successful updates - modified within main logic
 UPDATES_PERFORMED=0
-# Populated within main logic - needed by helper functions
 update_branch=""
 
 # --- Helper Functions ---
 
-# Check if a command exists
 check_command() {
     local cmd=$1
     if ! command -v "$cmd" &> /dev/null; then
@@ -59,28 +50,19 @@ check_command() {
     fi
 }
 
-# Load pinned packages from the config file
 load_pinned_packages() {
-    # Ensure array is empty before loading
     PINNED_PACKAGES=()
     if [[ -f "$CONFIG_FILE" ]]; then
         echo "Loading pinned packages from '$CONFIG_FILE'..."
-        # Read lines, ignore comments (#) and empty/whitespace-only lines
         while IFS= read -r line || [[ -n "$line" ]]; do
-            # Remove comments from end of line
             local pkg_line="${line%%#*}"
-            # Remove leading/trailing whitespace (using parameter expansion)
             pkg_line="${pkg_line#"${pkg_line%%[![:space:]]*}"}"
             pkg_line="${pkg_line%"${pkg_line##*[![:space:]]}"}"
-
-            if [[ -n "$pkg_line" ]]; then # If line is not empty after stripping
+            if [[ -n "$pkg_line" ]]; then
                 PINNED_PACKAGES+=("$pkg_line")
             fi
         done < "$CONFIG_FILE"
-        # Use * within quotes for safe echo of array contents
-        if (( ${#PINNED_PACKAGES[@]} > 0 )); then
-             echo "Pinned: ${PINNED_PACKAGES[*]}"
-        else
+        if (( ${#PINNED_PACKAGES[@]} == 0 )); then
              echo "Info: '$CONFIG_FILE' exists but contains no valid package names."
         fi
     else
@@ -88,24 +70,21 @@ load_pinned_packages() {
     fi
 }
 
-# Check if a given package name is in the pinned list
 is_pinned() {
     local package_name=$1
-    local pinned # loop variable
+    local pinned
     for pinned in "${PINNED_PACKAGES[@]}"; do
         if [[ "$pinned" == "$package_name" ]]; then
-            return 0 # 0 means true (is pinned)
+            return 0 # True (is pinned)
         fi
     done
-    return 1 # 1 means false (is not pinned)
+    return 1 # False (is not pinned)
 }
 
-# --- Function to handle prompting for push after updates ---
 handle_push_prompt() {
-    # Assumes UPDATES_PERFORMED, update_branch, REMOTE_NAME are accessible from main scope
     echo "$UPDATES_PERFORMED update(s) committed to branch '$update_branch'."
     local push_confirm
-    read -r -p "Do you want to push the branch '$update_branch' to remote '$REMOTE_NAME'? (y/N): " push_confirm
+    read -r -p "Do you want to push the branch '$update_branch' to remote '$REMOTE_NAME'? (y/N): " push_confirm < /dev/tty
     if [[ "$push_confirm" =~ ^[Yy]$ ]]; then
         echo "Pushing branch..."
         if ! git push -u "$REMOTE_NAME" "$update_branch"; then
@@ -118,23 +97,18 @@ handle_push_prompt() {
     fi
 }
 
-# --- Function to handle the case where no updates were done ---
 handle_no_updates() {
-    # Assumes CURRENT_BRANCH is accessible from main scope
      echo "No updates were performed or committed."
      local switch_back_confirm
-     read -r -p "Switch back to the original branch '$CURRENT_BRANCH'? (Y/n): " switch_back_confirm
-     # Default to Yes (switch back) if user just hits Enter or enters 'y'/'Y'
+     read -r -p "Switch back to the original branch '$CURRENT_BRANCH'? (Y/n): " switch_back_confirm < /dev/tty
      if [[ ! "$switch_back_confirm" =~ ^[Nn]$ ]]; then
         if ! git checkout "$CURRENT_BRANCH"; then
              echo "Warning: Failed to switch back to branch '$CURRENT_BRANCH'." >&2
         else
              echo "Switched back to branch '$CURRENT_BRANCH'."
         fi
-     # else: User entered 'n' or 'N', do nothing.
      fi
 }
-
 
 # --- Main Script Logic ---
 main() {
@@ -143,15 +117,12 @@ main() {
     check_command "composer"
     check_command "jq"
 
-    # Check for uncommitted changes directly
     if ! git diff --quiet HEAD --; then
         echo "Error: Your working directory has uncommitted changes." >&2
         echo "Please commit or stash them before running this script." >&2
         exit 1
     fi
 
-    # Get current branch name
-    # Need CURRENT_BRANCH available for handle_no_updates function later
     CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
     if [[ -z "$CURRENT_BRANCH" ]]; then
        echo "Error: Could not determine current git branch." >&2
@@ -165,13 +136,11 @@ main() {
     # --- Get Outdated Direct Dependencies ---
     echo "Checking for outdated direct dependencies..."
     local outdated_json
-    # Use process substitution <() to check command and capture output safely
     if ! outdated_json=$(composer outdated -D --no-dev --format=json); then
         echo "Error: 'composer outdated' command failed." >&2
         exit 1
     fi
 
-    # Use jq to parse the JSON and filter for installed packages
     local outdated_packages
     if ! outdated_packages=$(echo "$outdated_json" | jq -c '.installed[] | select(.name)'); then
          echo "Error: Failed to parse composer output with jq." >&2
@@ -182,55 +151,46 @@ main() {
         echo "No outdated direct dependencies found. Exiting."
         exit 0
     fi
-
     echo "Found outdated packages."
 
     # --- Create Update Branch ---
     local date_stamp
-    # Set date for branch name - using current system date when script runs
+    # Uses current system date for branch name
     date_stamp=$(date '+%Y-%m-%d')
-    # Need update_branch available for handle_push_prompt function later
     update_branch="${BRANCH_PREFIX}/${date_stamp}"
 
-    # Check if branch exists using rev-parse
     if git rev-parse --verify "$update_branch" &> /dev/null; then
         echo "Branch '$update_branch' already exists."
         local switch_branch_confirm
-        read -r -p "Do you want to switch to it and continue? (y/N): " switch_branch_confirm
+        read -r -p "Do you want to switch to it and continue? (y/N): " switch_branch_confirm < /dev/tty
         if [[ ! "$switch_branch_confirm" =~ ^[Yy]$ ]]; then
             echo "Aborting."
             exit 1
         fi
-        # Check switch success directly
         if ! git checkout "$update_branch"; then
            echo "Error switching to branch '$update_branch'. Aborting." >&2
            exit 1
         fi
     else
         echo "Creating and switching to branch '$update_branch'..."
-        # Check checkout -b success directly
         if ! git checkout -b "$update_branch"; then
            echo "Error creating branch '$update_branch'. Aborting." >&2
-           # Attempt to switch back to the original branch
            git checkout "$CURRENT_BRANCH" &> /dev/null
            exit 1
         fi
     fi
-
     echo "Switched to branch '$update_branch'."
 
     # --- Loop Through Updates (Using Process Substitution) ---
     echo # Blank line
     echo "----- Processing Updates -----"
-    # UPDATES_PERFORMED is initialized to 0 globally
+    UPDATES_PERFORMED=0 # Reset counter just before loop
     while IFS= read -r line; do
-        # Extract package details safely using jq within the loop
         local package_name current_version latest_version
         package_name=$(echo "$line" | jq -r '.name // empty')
         current_version=$(echo "$line" | jq -r '.version // empty')
         latest_version=$(echo "$line" | jq -r '.latest // empty')
 
-        # Basic validation
         if [[ -z "$package_name" || -z "$latest_version" ]]; then
              echo "Warning: Skipping malformed line from composer output: $line" >&2
              continue
@@ -241,29 +201,15 @@ main() {
         echo "Current version: ${current_version}"
         echo "Available:       ${latest_version}"
 
-        # --- ADD DEBUG for is_pinned ---
-        echo -n "DEBUG: Checking if '$package_name' is pinned... "
         if is_pinned "$package_name"; then
-            # This branch means is_pinned returned 0 (true)
-            echo "Yes (is_pinned returned true, skipping before prompt)" # Debug message
             echo "Status:          Pinned (ignored)."
             continue
-        else
-            # This branch means is_pinned returned non-zero (false)
-            echo "No (is_pinned returned false, proceeding to prompt)" # Debug message
         fi
-        # --- END DEBUG for is_pinned ---
 
-        # Confirm update
         local confirm_update
-        # Explicitly read from the terminal device, bypassing loop's stdin redirection
-        # ADD "< /dev/tty" to the end of this line:
+        # Explicitly read from the terminal device
         read -r -p "Do you want to update this package? (y/N): " confirm_update < /dev/tty
 
-        # Optional Debug line (can be kept or removed)
-        # echo "DEBUG: Input read was: ->${confirm_update}<-"
-
-        # Check if the input does NOT match exactly 'y' or 'Y'
         if [[ ! "$confirm_update" =~ ^[Yy]$ ]]; then
             echo "Status:          Skipped by user."
             continue
@@ -281,41 +227,55 @@ main() {
                  echo "Reverted composer.json and composer.lock."
             fi
             echo "Skipping commit for this package."
-            continue # Move to the next package
+            continue
         fi
 
         # --- If we reached here, composer update succeeded ---
         echo "Update successful for ${package_name}."
 
-        # Stage changes
-        if ! git add composer.json composer.lock; then
-            echo "Error: 'git add' failed for composer files. Manual intervention needed." >&2
+        local package_path
+        if ! package_path=$(composer show --path "$package_name" 2>/dev/null); then
+            echo "Warning: Could not determine installation path for '$package_name'. Code changes might not be committed." >&2
+            package_path=""
+        elif [[ -z "$package_path" ]]; then
+             echo "Warning: Composer returned an empty installation path for '$package_name'. Code changes might not be committed." >&2
+             package_path=""
+        else
+             package_path="${package_path#"${package_path%%[![:space:]]*}"}"
+             package_path="${package_path%"${package_path##*[![:space:]]}"}"
+        fi
+
+        local files_to_add=("composer.json" "composer.lock")
+        if [[ -n "$package_path" && -e "$package_path" ]]; then
+            files_to_add+=("$package_path")
+        elif [[ -n "$package_path" ]]; then
+             echo "Warning: Determined path '$package_path' for '$package_name' does not exist. Not staging this path." >&2
+        fi
+
+        if ! git add "${files_to_add[@]}"; then
+            echo "Error: 'git add' failed for updated files. Manual intervention needed." >&2
             echo "Skipping commit for this package due to staging issues."
             continue
         fi
 
-        # Commit changes, checking failure directly
         local commit_msg="Update ${package_name} to ${latest_version}"
         if ! git commit -m "$commit_msg"; then
             echo "Error: 'git commit' failed. Manual intervention may be needed." >&2
             echo "Attempting to unstage changes..."
-            git reset HEAD -- composer.json composer.lock &> /dev/null
-            continue # Skip to next package
+            git reset HEAD -- "${files_to_add[@]}" &> /dev/null
+            continue
         else
             echo "Committed: ${commit_msg}"
-            # This increment now correctly affects the global counter
             UPDATES_PERFORMED=$((UPDATES_PERFORMED + 1))
         fi
         echo "-----------------------------"
 
-    # Feed the while loop using Process Substitution to avoid subshell issues with UPDATES_PERFORMED
-    done < <(echo "$outdated_packages")
+    done < <(echo "$outdated_packages") # Feed loop using Process Substitution
 
     echo # Blank line
     echo "----- Update Summary -----"
 
     # --- Push Branch or Handle No Updates ---
-    # Call helper functions based on whether updates were committed
     if [[ $UPDATES_PERFORMED -gt 0 ]]; then
         handle_push_prompt
     else
@@ -326,10 +286,8 @@ main() {
     echo "Script finished."
     echo "Remember to run database updates (drush updb) and clear caches (drush cr) on your server after deploying."
 
-    # Exit with success
     exit 0
 }
 
 # --- Run the main function ---
-# Pass any script arguments to main (though none are currently used)
 main "$@"

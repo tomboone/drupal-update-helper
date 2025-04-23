@@ -10,7 +10,7 @@
     }
   ],
   "bin": [
-    "scripts/drupal-update-helper.sh"
+    "scripts/drupal-update-helper"
   ],
   "require": {
     "php": ">=7.2"

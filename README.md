@@ -40,7 +40,7 @@ composer require --dev tomboone/drupal-update-helper
 2. Ensure your Git working directory is clean (no uncommitted changes).
 3. Run the script:
     ```bash
-    vendor/bin/drupal-update-helper.sh
+    vendor/bin/drupal-update-helper
     ```
 4. Follow the prompts:
    * The script will detect outdated packages.
