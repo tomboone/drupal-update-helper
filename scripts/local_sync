@@ -1,0 +1,200 @@
+#!/bin/bash
+
+################################################################################
+# Drupal Production to Local Sync Script (Auto-Discovery)
+#
+# Synchronizes database, files, and optionally private files from production
+# Drush aliases (.prod) to corresponding local aliases (.local) found in the
+# Drush configuration. It automatically discovers alias pairs and re-imports
+# the local config split configuration.
+#
+# Requirements:
+# 1. Run from the Drupal project root directory.
+# 2. Drush aliases must be configured (e.g., in `drush/sites/self.site.yml`)
+#    following the pattern `@self.SITE_PREFIX.prod` and `@self.SITE_PREFIX.local`.
+# 3. The local alias definition should contain the config split name under
+#    `options.config_import.config_split`.
+# 4. `jq` command-line JSON processor must be installed for parsing Drush output.
+# 5. `sed` command-line stream editor must be available.
+#
+# Usage:
+# ./sync_prod_to_local.sh
+# (No arguments needed, it automatically finds @self.*.local aliases)
+#
+# Options:
+#   -h, --help               Display this help message.
+#
+################################################################################
+
+# --- Function to display usage ---
+usage() {
+  echo "Usage: $0"
+  echo "  Synchronizes Drupal prod sites to local based on automatically discovered"
+  echo "  alias pairs (@self.*.prod -> @self.*.local)."
+  echo ""
+  echo "Options:"
+  echo "  -h, --help           Display this help message."
+  exit 1
+}
+
+# --- Initial Checks ---
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+fi
+
+# Check if jq is installed
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq command-line JSON processor is not installed. Please install jq."
+    exit 1
+fi
+
+# Check if sed is installed
+if ! command -v sed &> /dev/null; then
+    echo "Error: sed command-line stream editor is not installed."
+    exit 1
+fi
+
+# --- Configuration ---
+DRUSH_CMD="vendor/bin/drush"
+ALIAS_PREFIX="self" # Assuming aliases are like @self.site.prod
+LOCAL_SUFFIX=".local"
+PROD_SUFFIX=".prod"
+
+# Check if Drush command exists
+if [ ! -x "$DRUSH_CMD" ]; then
+  echo "Error: Drush command not found or not executable at $DRUSH_CMD"
+  echo "Ensure you are in the Drupal project root and ran 'composer install'."
+  exit 1
+fi
+
+# --- Discover Local Aliases ---
+echo "Discovering local Drush aliases (@${ALIAS_PREFIX}.*${LOCAL_SUFFIX})..."
+# Get all aliases, filter for the pattern @self.*.local
+# Use grep -o to extract only the matching part, then remove the leading @
+# Store in an array
+mapfile -t LOCAL_ALIASES < <("$DRUSH_CMD" site:alias --format=list | grep -o "@${ALIAS_PREFIX}\.[^ ]*${LOCAL_SUFFIX}")
+
+if [ ${#LOCAL_ALIASES[@]} -eq 0 ]; then
+    echo "Error: No Drush aliases found matching the pattern '@${ALIAS_PREFIX}.*${LOCAL_SUFFIX}'."
+    exit 1
+fi
+
+echo "Found ${#LOCAL_ALIASES[@]} local aliases to process."
+
+# --- Main Loop ---
+EXIT_CODE=0 # Track overall success
+
+for LOCAL_ALIAS in "${LOCAL_ALIASES[@]}"; do
+  # Extract site prefix: remove @self. and .local
+  SITE_PREFIX=$(echo "$LOCAL_ALIAS" | sed -e "s/^@${ALIAS_PREFIX}\.//" -e "s/${LOCAL_SUFFIX}$//")
+  PROD_ALIAS="@${ALIAS_PREFIX}.${SITE_PREFIX}${PROD_SUFFIX}"
+
+  echo "--------------------------------------------------"
+  echo "--- Processing site prefix: $SITE_PREFIX"
+  echo "--- Local Alias: $LOCAL_ALIAS"
+  echo "--- Prod Alias: $PROD_ALIAS"
+  echo "--------------------------------------------------"
+
+
+  # --- Verify Aliases Exist (Prod alias needs verification now) ---
+  echo "Verifying aliases $PROD_ALIAS and $LOCAL_ALIAS..."
+   if ! "$DRUSH_CMD" site:alias "$LOCAL_ALIAS" --format=list > /dev/null 2>&1; then
+      # This shouldn't happen based on discovery, but check anyway
+      echo "Error: Local alias $LOCAL_ALIAS verification failed unexpectedly. Skipping."
+      EXIT_CODE=1
+      continue
+  fi
+  if ! "$DRUSH_CMD" site:alias "$PROD_ALIAS" --format=list > /dev/null 2>&1; then
+      echo "Error: Corresponding production alias $PROD_ALIAS not found for $LOCAL_ALIAS. Skipping."
+      EXIT_CODE=1
+      continue
+  fi
+  echo "Aliases verified."
+
+  # --- Get Config Split Name ---
+  echo "Attempting to get config split name from $LOCAL_ALIAS..."
+  CONFIG_SPLIT_NAME=$("$DRUSH_CMD" site:alias "$LOCAL_ALIAS" --format=json | jq -r '.options."config_import.config_split" // empty')
+
+  if [ -z "$CONFIG_SPLIT_NAME" ] || [ "$CONFIG_SPLIT_NAME" == "null" ]; then
+      echo "Warning: Could not find 'options.config_import.config_split' in alias $LOCAL_ALIAS."
+      CONFIG_SPLIT_NAME="" # Ensure it's empty for later checks
+  else
+      echo "Found config split name: $CONFIG_SPLIT_NAME"
+  fi
+
+  # --- Sync Database ---
+  echo "Syncing database: $PROD_ALIAS -> $LOCAL_ALIAS..."
+  if ! "$DRUSH_CMD" sql:sync "$PROD_ALIAS" "$LOCAL_ALIAS" --extra-dump=" | sed '1d'" --yes; then
+      echo "Error: sql:sync failed for $SITE_PREFIX."
+      EXIT_CODE=1
+      continue # Skip remaining steps for this site on DB sync failure
+  fi
+  echo "Database sync complete."
+
+  # --- Import Config Split ---
+  if [ -n "$CONFIG_SPLIT_NAME" ]; then
+      echo "Importing config split '$CONFIG_SPLIT_NAME' on $LOCAL_ALIAS..."
+      if ! "$DRUSH_CMD" "$LOCAL_ALIAS" config-split:import "$CONFIG_SPLIT_NAME" --yes; then
+          echo "Error: config-split:import failed for $SITE_PREFIX."
+          EXIT_CODE=1
+      else
+          echo "Config split import complete."
+      fi
+  else
+      echo "Skipping config split import (name not found in alias)."
+  fi
+
+  # --- Sync Public Files ---
+  echo "Syncing public files (%files): $PROD_ALIAS -> $LOCAL_ALIAS..."
+  if ! "$DRUSH_CMD" core:rsync "${PROD_ALIAS}:%files" "${LOCAL_ALIAS}:%files" --yes; then
+      echo "Error: core:rsync %files failed for $SITE_PREFIX."
+      EXIT_CODE=1
+  else
+      echo "Public file sync complete."
+  fi
+
+  # --- Sync Private Files (Conditional) ---
+  echo "Checking for private file paths (%private)..."
+  PROD_HAS_PRIVATE=false
+  LOCAL_HAS_PRIVATE=false
+
+  # Check prod
+  if "$DRUSH_CMD" "$PROD_ALIAS" status --fields=path-aliases --format=json | jq -e '."%private"' > /dev/null 2>&1; then
+      PROD_HAS_PRIVATE=true
+      echo " - Found %private path on $PROD_ALIAS."
+  else
+      echo " - Private path (%private) not found or not set on $PROD_ALIAS."
+  fi
+
+  # Check local
+  if "$DRUSH_CMD" "$LOCAL_ALIAS" status --fields=path-aliases --format=json | jq -e '."%private"' > /dev/null 2>&1; then
+      LOCAL_HAS_PRIVATE=true
+      echo " - Found %private path on $LOCAL_ALIAS."
+  else
+      echo " - Private path (%private) not found or not set on $LOCAL_ALIAS."
+  fi
+
+  if [ "$PROD_HAS_PRIVATE" = true ] && [ "$LOCAL_HAS_PRIVATE" = true ]; then
+      echo "Syncing private files (%private): $PROD_ALIAS -> $LOCAL_ALIAS..."
+      if ! "$DRUSH_CMD" core:rsync "${PROD_ALIAS}:%private" "${LOCAL_ALIAS}:%private" --yes; then
+          echo "Error: core:rsync %private failed for $SITE_PREFIX."
+          EXIT_CODE=1
+      else
+          echo "Private file sync complete."
+      fi
+  else
+      echo "Skipping private file sync (path not defined on both prod and local)."
+  fi
+
+  echo "--- Finished processing site prefix: $SITE_PREFIX ---"
+
+done
+
+echo "--------------------------------------------------"
+echo "--- Sync Script Complete ---"
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "Warning: One or more errors occurred during the process."
+fi
+echo "--------------------------------------------------"
+
+exit $EXIT_CODE

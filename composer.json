@@ -11,7 +11,8 @@
   ],
   "bin": [
     "scripts/composer-update-helper",
-    "scripts/check_modules"
+    "scripts/check_modules",
+    "scripts/local_sync"
   ],
   "require": {
     "php": ">=7.2"
