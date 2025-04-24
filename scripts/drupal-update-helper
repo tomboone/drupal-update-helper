@@ -233,17 +233,25 @@ main() {
         # --- If we reached here, composer update succeeded ---
         echo "Update successful for ${package_name}."
 
+        # --- Get the installation path of the updated package ---
         local package_path
-        if ! package_path=$(composer show --path "$package_name" 2>/dev/null); then
-            echo "Warning: Could not determine installation path for '$package_name'. Code changes might not be committed." >&2
-            package_path=""
-        elif [[ -z "$package_path" ]]; then
+        local raw_path_output
+        # Use composer show --path to find where the package lives
+        if ! raw_path_output=$(composer show --path "$package_name" 2>/dev/null); then
+            echo "Warning: Could not determine installation path for '$package_name' using 'composer show --path'. Code changes might not be committed." >&2
+            package_path="" # Ensure variable is empty if command failed
+        elif [[ -z "$raw_path_output" ]]; then
              echo "Warning: Composer returned an empty installation path for '$package_name'. Code changes might not be committed." >&2
-             package_path=""
+             package_path="" # Ensure variable is empty
         else
+             # Attempt to extract the last field (path) in case composer outputs name + path
+             package_path=$(echo "$raw_path_output" | awk '{print $NF}')
+             # Trim potential whitespace again
              package_path="${package_path#"${package_path%%[![:space:]]*}"}"
              package_path="${package_path%"${package_path##*[![:space:]]}"}"
+             # echo "DEBUG: Raw path output: '$raw_path_output'. Extracted path: '$package_path'" # Optional debug
         fi
+        # --- END Get Path ---
 
         local files_to_add=("composer.json" "composer.lock")
         if [[ -n "$package_path" && -e "$package_path" ]]; then
@@ -256,6 +264,17 @@ main() {
             echo "Error: 'git add' failed for updated files. Manual intervention needed." >&2
             echo "Skipping commit for this package due to staging issues."
             continue
+        fi
+
+        # --- Check if anything was actually staged ---
+        # Use --quiet to just get exit status, --cached or --staged checks the index
+        if git diff --staged --quiet; then
+            # Exit code 0 means no differences = nothing staged
+            echo "Info: No actual file changes were staged for ${package_name}. Skipping commit."
+            # We might have added files that existed but had no changes, reset them just in case
+            # Although skipping commit might be enough. Consider if reset is needed.
+            # git reset HEAD -- "${files_to_add[@]}" &> /dev/null
+            continue # Skip to next package
         fi
 
         local commit_msg="Update ${package_name} to ${latest_version}"
