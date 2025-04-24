@@ -4,39 +4,74 @@
 # Drupal Multisite Module Status Check (Updated for Modern Drush/Composer)
 #
 # Checks for security vulnerabilities, general updates, and lists
-# Composer-managed Drupal modules that are not enabled on any site within a
-# specified Drush alias group.
+# Composer-managed Drupal modules that are not enabled on any site matching
+# a specific alias environment pattern (.local or .prod).
 #
 # Requirements:
 # 1. Run from the Drupal project root directory (where composer.json is).
-# 2. `jq` command-line JSON processor must be installed (though not strictly needed
-#    by this version of the script, kept for potential future use).
-# 3. A Drush alias group must be configured for your multisite setup in your
-#    Drush configuration (e.g., in `drush/sites/updates.site.yml`). This script
-#    uses the alias group name defined by the environment variable
-#    `DRUSH_MULTISITE_GROUP_ALIAS`, defaulting to '@updates'.
+# 2. Drush aliases must be configured (e.g., in `drush/sites/self.site.yml`).
+#    This script will find aliases ending in the specified environment suffix.
+# 3. `jq` command-line JSON processor is no longer strictly needed by this script.
 #
 # Usage:
-# ./check_modules.sh
-# DRUSH_MULTISITE_GROUP_ALIAS='@my_multisite_group' ./check_modules.sh
+# ./check_modules.sh -e local
+# ./check_modules.sh --environment=prod
+#
+# Options:
+#   -e, --environment <env>  Specify the environment suffix ('local' or 'prod'). Required.
+#   -h, --help               Display this help message.
 #
 # Note: This script now uses 'composer audit' for security checks and
 # 'composer outdated' for update checks, reflecting modern Drupal practices.
+# It dynamically discovers target aliases based on the specified environment.
 #
 ################################################################################
+
+# --- Function to display usage ---
+usage() {
+  echo "Usage: $0 -e <environment>"
+  echo "Options:"
+  echo "  -e, --environment <env>  Specify the environment suffix ('local' or 'prod'). Required."
+  echo "  -h, --help               Display this help message."
+  exit 1
+}
+
+# --- Argument Parsing ---
+TARGET_ENV=""
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -e|--environment) TARGET_ENV="$2"; shift ;;
+        -h|--help) usage ;;
+        *) echo "Unknown parameter passed: $1"; usage ;;
+    esac
+    shift
+done
+
+# Validate required argument
+if [ -z "$TARGET_ENV" ]; then
+    echo "Error: Missing required argument -e or --environment."
+    usage
+fi
+
+# Validate environment value
+if [[ "$TARGET_ENV" != "local" && "$TARGET_ENV" != "prod" ]]; then
+    echo "Error: Invalid environment specified. Use 'local' or 'prod'."
+    usage
+fi
 
 echo "############################################"
 echo "### Drupal Module Status Check ###"
 echo "############################################"
 CURRENT_DATE=$(date +"%Y-%m-%d %H:%M:%S")
 echo "Check run on: $CURRENT_DATE"
+echo "Targeting environment: .$TARGET_ENV"
 echo
 
 # --- Configuration ---
 # Use project's Drush binary explicitly
 DRUSH_CMD="vendor/bin/drush"
-# Use environment variable for alias group, default to @updates
-DRUSH_ALIAS_GROUP=${DRUSH_MULTISITE_GROUP_ALIAS:-@updates}
+# Patterns for alias discovery based on argument
+ALIAS_PATTERN="\.${TARGET_ENV}$" # Construct pattern like \.local$ or \.prod$
 
 # Check if Drush command exists
 if [ ! -x "$DRUSH_CMD" ]; then
@@ -45,23 +80,38 @@ if [ ! -x "$DRUSH_CMD" ]; then
   exit 1
 fi
 
-# Check if jq is installed (Optional dependency now, but good practice)
-# if ! command -v jq &> /dev/null; then
-#     echo "Warning: jq command-line JSON processor is not installed. It might be needed for future script versions."
-# fi
-
 echo "Using Drush command: $DRUSH_CMD"
-echo "Targeting Drush alias group: $DRUSH_ALIAS_GROUP (Set DRUSH_MULTISITE_GROUP_ALIAS to override)"
+
+# --- Determine Target Aliases ---
+echo "Discovering target Drush aliases (ending with .$TARGET_ENV)..."
+# Get all aliases, filter by pattern, join with commas
+all_aliases_output=$("$DRUSH_CMD" site:alias --format=list 2>&1)
+drush_alias_exit_code=$?
+
+if [ $drush_alias_exit_code -ne 0 ]; then
+    echo "Error: Failed to list Drush site aliases (Exit code: $drush_alias_exit_code)."
+    echo "$all_aliases_output"
+    TARGET_ALIASES="" # Ensure variable is empty on error
+else
+    # Filter and format the aliases using the dynamic pattern
+    TARGET_ALIASES=$(echo "$all_aliases_output" | grep -E "$ALIAS_PATTERN" | paste -sd,)
+fi
+
+if [ -z "$TARGET_ALIASES" ]; then
+    echo "Warning: No Drush aliases found matching the pattern '$ALIAS_PATTERN'."
+    echo "         Skipping check for unused modules across sites."
+else
+    echo "Targeting dynamically discovered aliases: $TARGET_ALIASES"
+fi
 echo
+
 
 # --- Security Audit ---
 echo "--- Checking Security Vulnerabilities (composer audit) ---"
 # composer audit returns non-zero exit code if vulnerabilities are found.
-# We capture the output and check the exit code separately.
 audit_output=$(composer audit 2>&1)
 audit_exit_code=$?
 echo "$audit_output"
-# Exit code 0 means no vulnerabilities, other codes indicate issues or errors.
 if [ $audit_exit_code -ne 0 ]; then
  echo "Warning: 'composer audit' reported vulnerabilities or an error (exit code $audit_exit_code)."
 fi
@@ -70,9 +120,7 @@ echo
 # --- Available Updates (Minor/Major) ---
 echo "--- Checking Available Updates (composer outdated 'drupal/*') ---"
 echo "(Review versions below to identify Minor vs Major updates)"
-# composer outdated returns 0 if everything is up to date, 1 if updates are available, >1 on error.
 if ! composer outdated 'drupal/*'; then
-  # Check exit code specifically for errors (not just outdated packages)
   outdated_exit_code=$?
   if [ $outdated_exit_code -gt 1 ]; then
     echo "Warning: Error occurred while checking for outdated Drupal packages (exit code $outdated_exit_code)."
@@ -81,7 +129,7 @@ fi
 echo
 
 # --- Unused Composer Modules ---
-echo "--- Checking for Composer Modules Not Enabled Anywhere in '$DRUSH_ALIAS_GROUP' ---"
+echo "--- Checking for Composer Modules Not Enabled Anywhere on discovered .$TARGET_ENV aliases ---"
 
 # Define temp files
 composer_modules_file=$(mktemp)
@@ -91,59 +139,62 @@ trap 'rm -f "$composer_modules_file" "$enabled_modules_file"' EXIT
 
 # Get Composer modules (installed, non-dev, drupal/*)
 echo "Getting installed Drupal modules from composer..."
-# List installed (default), non-dev packages, filter for drupal/, remove prefix, sort.
-# Removed deprecated --installed flag.
 if ! composer show --no-dev --name-only | grep '^drupal/' | sed 's/^drupal\///' | sort > "$composer_modules_file"; then
     echo "Error: Failed to get installed Drupal modules via composer."
-    # Optionally continue if you want other checks to run
+    module_list_ok=false
 else
-    module_count=$(wc -l < "$composer_modules_file" | tr -d ' ') # Get count, remove whitespace
+    module_count=$(wc -l < "$composer_modules_file" | tr -d ' ')
     echo "Found $module_count installed non-dev contrib/custom modules via composer."
+    module_list_ok=true
 fi
 
-# Get Enabled modules across all sites in the specified alias group
-echo "Getting enabled modules from all sites in '$DRUSH_ALIAS_GROUP' via Drush..."
-# Important: Ensure the alias group '$DRUSH_ALIAS_GROUP' is correctly defined in your Drush config!
-# Changed format back to 'list' as 'pipe' was unavailable.
-if ! "$DRUSH_CMD" "$DRUSH_ALIAS_GROUP" pm:list --status=enabled --type=module --no-core --fields=name --format=list | sort | uniq > "$enabled_modules_file"; then
-    echo "Warning: Failed to get enabled modules via Drush alias group '$DRUSH_ALIAS_GROUP'."
-    echo "Check Drush alias configuration, site status, and Drush version compatibility for all sites in the group."
-    # Decide if you want to exit or continue cautiously
-else
-   enabled_count=$(wc -l < "$enabled_modules_file" | tr -d ' ') # Get count, remove whitespace
-   echo "Found $enabled_count unique enabled contrib/custom modules across sites in '$DRUSH_ALIAS_GROUP'."
-fi
+# Proceed only if target aliases were found and composer list is ok
+if [ -n "$TARGET_ALIASES" ] && [ "$module_list_ok" = true ]; then
+    # Get Enabled modules across all discovered sites
+    echo "Getting enabled modules from discovered aliases ($TARGET_ALIASES) via Drush..."
+    if ! "$DRUSH_CMD" "$TARGET_ALIASES" pm:list --status=enabled --type=module --no-core --fields=name --format=list | sort | uniq > "$enabled_modules_file"; then
+        echo "Warning: Failed to get enabled modules via Drush for discovered aliases."
+        echo "         Check Drush alias configuration, site status, and Drush version compatibility."
+        drush_list_ok=false
+    else
+       enabled_count=$(wc -l < "$enabled_modules_file" | tr -d ' ')
+       echo "Found $enabled_count unique enabled contrib/custom modules across discovered aliases."
+       drush_list_ok=true
+    fi
 
-
-# Compare lists if both files were created successfully and composer file is not empty
-if [ -f "$composer_modules_file" ] && [ -s "$composer_modules_file" ] && [ -f "$enabled_modules_file" ]; then
-  echo "Comparing lists..."
-  # comm requires non-empty files for comparison in some versions
-  # Check if enabled_modules file is empty first
-  if [ ! -s "$enabled_modules_file" ]; then
-      # This case can happen if Drush failed OR if truly no contrib modules are enabled
-      echo "Result: No enabled contrib/custom modules found via Drush in '$DRUSH_ALIAS_GROUP'."
-      echo "        This could be an error, or it might be correct if no modules are enabled."
-      echo "        Assuming all composer modules are potentially unused:"
-      echo "---"
-      cat "$composer_modules_file"
-      echo "---"
-  else
-      unused_modules=$(comm -23 "$composer_modules_file" "$enabled_modules_file")
-
-      if [ -z "$unused_modules" ]; then
-          echo "Result: All detected composer drupal-modules (non-dev) appear to be enabled on at least one site in '$DRUSH_ALIAS_GROUP'."
+    # Compare lists if both files were created successfully and composer file is not empty
+    if [ "$drush_list_ok" = true ] && [ -f "$composer_modules_file" ] && [ -s "$composer_modules_file" ] && [ -f "$enabled_modules_file" ]; then
+      echo "Comparing lists..."
+      if [ ! -s "$enabled_modules_file" ]; then
+          echo "Result: No enabled contrib/custom modules found via Drush on the targeted .$TARGET_ENV aliases."
+          echo "        Assuming all composer modules are potentially unused on these sites:"
+          echo "---"
+          cat "$composer_modules_file"
+          echo "---"
       else
-          echo "Result: Modules installed via composer (non-dev) but NOT enabled on any site in '$DRUSH_ALIAS_GROUP':"
-          echo "---"
-          echo "$unused_modules"
-          echo "---"
+          unused_modules=$(comm -23 "$composer_modules_file" "$enabled_modules_file")
+          if [ -z "$unused_modules" ]; then
+              echo "Result: All detected composer drupal-modules (non-dev) appear to be enabled on at least one targeted .$TARGET_ENV site."
+          else
+              echo "Result: Modules installed via composer (non-dev) but NOT enabled on any targeted .$TARGET_ENV site:"
+              echo "---"
+              echo "$unused_modules"
+              echo "---"
+          fi
       fi
-  fi
-elif [ -f "$composer_modules_file" ] && [ ! -s "$composer_modules_file" ]; then
-    echo "Result: No installed non-dev Drupal modules found via composer to compare."
+    elif [ "$drush_list_ok" = false ]; then
+        echo "Warning: Could not perform comparison because fetching enabled modules via Drush failed."
+    elif [ -f "$composer_modules_file" ] && [ ! -s "$composer_modules_file" ]; then
+        echo "Result: No installed non-dev Drupal modules found via composer to compare."
+    else
+      echo "Warning: Could not perform comparison due to other errors fetching module lists."
+    fi
 else
-  echo "Warning: Could not perform comparison due to errors fetching one or both module lists."
+    if [ -z "$TARGET_ALIASES" ]; then
+        echo "Skipping comparison: No target aliases ending in .$TARGET_ENV were discovered."
+    elif [ "$module_list_ok" = false ]; then
+        echo "Skipping comparison: Failed to get module list from composer."
+    fi
 fi
 
 echo
