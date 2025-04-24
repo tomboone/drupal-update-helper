@@ -181,6 +181,8 @@ main() {
     fi
     echo "Switched to branch '$update_branch'."
 
+    local -a MAJOR_UPDATES_AVAILABLE=() # Declare array to hold report strings
+
     # --- Loop Through Updates (Using Process Substitution) ---
     echo # Blank line
     echo "----- Processing Updates -----"
@@ -201,6 +203,21 @@ main() {
         echo "Current version: ${current_version}"
         echo "Available:       ${latest_version}"
 
+        # --- Detect Major Version Updates ---
+        # Simple major version extraction (remove v, take first number before . or -)
+        # Handles versions like v1.2.3, 10.4.5, 2.0.0-beta9 etc.
+        # Might not work well for 'dev-master' or complex non-numeric prefixes
+        local current_major latest_major
+        current_major=$(echo "$current_version" | sed -e 's/^[vV]*//' -e 's/[.-].*//')
+        latest_major=$(echo "$latest_version" | sed -e 's/^[vV]*//' -e 's/[.-].*//')
+
+        # Check if both look like numbers and latest > current
+        if [[ "$current_major" =~ ^[0-9]+$ && "$latest_major" =~ ^[0-9]+$ && $latest_major -gt $current_major ]]; then
+            # Store package info for the report
+            MAJOR_UPDATES_AVAILABLE+=("${package_name} (${current_version} -> ${latest_version})")
+        fi
+        # --- End Major Version Detection ---
+
         if is_pinned "$package_name"; then
             echo "Status:          Pinned (ignored)."
             continue
@@ -217,19 +234,73 @@ main() {
 
         # --- Perform Update ---
         echo "Attempting update..."
-        if ! composer update "$package_name" --with-dependencies --no-scripts --no-dev; then
+        # Capture stderr to check for specific errors
+        local composer_stderr
+        # We need to run the command and capture stderr, while still checking exit code
+        # Using process substitution and temporary file for stderr capture
+        local stderr_file
+        # Use mktemp securely, exit loop iteration if it fails
+        stderr_file=$(mktemp) || { echo "Error: Cannot create temp file for stderr capture" >&2; continue; }
+
+        # Execute composer update, redirect stderr to temp file, check exit code directly
+        if ! composer update "$package_name" --with-dependencies --no-scripts --no-dev 2> "$stderr_file"; then
             local update_exit_code=$?
+            # Ensure stderr file is read even if it's empty, then remove it
+            composer_stderr=$(<"$stderr_file")
+            rm "$stderr_file" # Clean up temp file
+
             echo "Error: Composer update failed for ${package_name} (Exit code: ${update_exit_code})." >&2
-            echo "Attempting to revert changes to composer.json and composer.lock..."
-            if ! git checkout -- composer.json composer.lock; then
-                 echo "Warning: Failed to automatically revert composer configuration files." >&2
+
+            # --- Check for specific "missing .git" error ---
+            local renamed_git_dir_name=".git_" # Using the corrected name
+            local package_install_path # We need the path again here
+
+            # Attempt to get the path robustly
+            package_install_path=$(composer show --path "$package_name" 2>/dev/null | awk '{print $NF}')
+            package_install_path="${package_install_path#"${package_install_path%%[![:space:]]*}"}" # Trim leading
+            package_install_path="${package_install_path%"${package_install_path##*[![:space:]]}"}"  # Trim trailing
+
+            # Check error message AND if the renamed directory exists in the determined path
+            if [[ "$composer_stderr" == *"The .git directory is missing"* && -n "$package_install_path" && -d "$package_install_path/$renamed_git_dir_name" ]]; then
+                 # Specific error related to renamed .git_ detected
+                 echo "------------------------------------------------------------------" >&2
+                 echo "Detected 'missing .git' error, likely due to renamed '${renamed_git_dir_name}' directory." >&2
+                 echo "This often requires a clean reinstall of the package." >&2
+                 echo "To fix this specific package ($package_name), please manually:" >&2
+                 # --- MODIFIED INSTRUCTIONS ---
+                 echo "  1. Ensure you are in your project root in the correct environment (native shell, Docker container, etc.)." >&2
+                 echo "  2. Remove the current package directory:" >&2
+                 echo "     rm -rf \"$package_install_path\"" >&2
+                 echo "  3. Reinstall dependencies using Composer (GitHub auth might be required):" >&2
+                 echo "     composer install" >&2
+                 # --- END MODIFIED INSTRUCTIONS ---
+                 echo "  4. Then, re-run this update script if needed." >&2
+                 echo "------------------------------------------------------------------" >&2
             else
-                 echo "Reverted composer.json and composer.lock."
+                # Generic failure message (print captured stderr for other errors)
+                echo "Composer error output:" >&2
+                # Check if stderr is empty before printing
+                if [[ -n "$composer_stderr" ]]; then
+                    echo "$composer_stderr" >&2
+                else
+                    echo "(No specific error output captured from Composer)" >&2
+                fi
+
+                # Attempt standard revert for other errors
+                echo "Attempting to revert changes to composer.json and composer.lock..."
+                if ! git checkout -- composer.json composer.lock; then
+                     echo "Warning: Failed to automatically revert composer configuration files." >&2
+                else
+                     echo "Reverted composer.json and composer.lock."
+                fi
             fi
             echo "Skipping commit for this package."
-            continue
+            continue # Move to the next package
+        else
+            # Composer update succeeded (no error)
+            rm "$stderr_file" # Clean up temp file on success too
         fi
-
+        # --- END Perform Update ---
         # --- If we reached here, composer update succeeded ---
         echo "Update successful for ${package_name}."
 
@@ -270,12 +341,14 @@ main() {
         # Use --quiet to just get exit status, --cached or --staged checks the index
         if git diff --staged --quiet; then
             # Exit code 0 means no differences = nothing staged
-            echo "Info: No actual file changes were staged for ${package_name}. Skipping commit."
-            # We might have added files that existed but had no changes, reset them just in case
-            # Although skipping commit might be enough. Consider if reset is needed.
-            # git reset HEAD -- "${files_to_add[@]}" &> /dev/null
+            echo "Info: No file changes staged for ${package_name}." # Keep it simple
+            echo "      (Update may be blocked by composer.json constraints or package was already up-to-date within constraints)." # EXPLANATION ADDED
+            echo "      Skipping commit."
+            # We might have added files that existed but had no changes, reset them just in case?
+            git reset HEAD -- "${files_to_add[@]}" &> /dev/null # Optional reset
             continue # Skip to next package
         fi
+        # --- END Staged Check ---
 
         local commit_msg="Update ${package_name} to ${latest_version}"
         if ! git commit -m "$commit_msg"; then
@@ -300,6 +373,20 @@ main() {
     else
         handle_no_updates
     fi
+
+    # --- Report Major Updates Available ---
+    if (( ${#MAJOR_UPDATES_AVAILABLE[@]} > 0 )); then
+        echo # Blank line
+        echo "---------------------------------------------"
+        echo " Major Version Updates Available Detected: "
+        echo "---------------------------------------------"
+        echo "The following packages have newer major versions available."
+        echo "Upgrading requires manually editing composer.json constraints,"
+        echo "running 'composer update [package]' again, and thorough testing:"
+        printf " * %s\n" "${MAJOR_UPDATES_AVAILABLE[@]}"
+        echo "---------------------------------------------"
+    fi
+    # --- End Report ---
 
     echo # Blank line
     echo "Script finished."
