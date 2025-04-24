@@ -1,0 +1,131 @@
+#!/bin/bash
+
+################################################################################
+# Drupal Multisite Module Status Check
+#
+# Checks for security updates, general updates, and lists Composer-managed
+# modules that are not enabled on any site within a specified Drush alias group.
+#
+# Requirements:
+# 1. Run from the Drupal project root directory (where composer.json is).
+# 2. `jq` command-line JSON processor must be installed.
+# 3. A Drush alias group must be configured for your multisite setup in your
+#    Drush configuration (e.g., in `drush/sites/updates.site.yml`). This script
+#    uses the alias group name defined by the environment variable
+#    `DRUSH_MULTISITE_GROUP_ALIAS`, defaulting to '@updates'.
+#    Example `drush/sites/updates.site.yml` entry:
+#      sites:
+#        site-list:
+#          - @updates.site1.local # Replace with your actual local aliases
+#          - @updates.site2.local # Replace with your actual local aliases
+#
+# Usage:
+# ./check_modules
+# ALIAS_GROUP='@my_multisite_group' ./check_modules
+#
+################################################################################
+
+echo "############################################"
+echo "### Drupal Module Status Check ###"
+echo "############################################"
+CURRENT_DATE=$(date +"%Y-%m-%d %H:%M:%S")
+echo "Check run on: $CURRENT_DATE"
+echo
+
+# --- Configuration ---
+# Use project's Drush binary explicitly
+DRUSH_CMD="vendor/bin/drush"
+# Use environment variable for alias group, default to @updates
+DRUSH_ALIAS_GROUP=${ALIAS_GROUP:-@updates}
+
+# Check if Drush command exists
+if [ ! -x "$DRUSH_CMD" ]; then
+  echo "Error: Drush command not found or not executable at $DRUSH_CMD"
+  echo "Ensure you are in the Drupal project root and ran 'composer install'."
+  exit 1
+fi
+
+# Check if jq is installed
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq command-line JSON processor is not installed. Please install jq."
+    exit 1
+fi
+
+echo "Using Drush command: $DRUSH_CMD"
+echo "Targeting Drush alias group: $DRUSH_ALIAS_GROUP (Set DRUSH_MULTISITE_GROUP_ALIAS to override)"
+echo
+
+# --- Security Updates ---
+echo "--- Checking Security Updates ---"
+# Using --check-updated to avoid listing already updated items
+if ! "$DRUSH_CMD" pm:security --check-updated --format=table; then
+ echo "Warning: Error occurred while checking security updates."
+fi
+echo
+
+# --- Minor/Major Updates ---
+echo "--- Checking Minor/Major Updates ---"
+echo "(Requires manual interpretation/parsing for exact Minor vs Major from table)"
+# Using --check-updated to avoid listing already updated items
+if ! "$DRUSH_CMD" pm:update:status --check-updated --format=table; then
+  echo "Warning: Error occurred while checking general updates."
+fi
+echo
+# Optional: Add JSON output and parsing logic here if needed for strict minor/major separation
+# "$DRUSH_CMD" pm:update:status --check-updated --format=json > updates.json
+# Add parsing logic using jq/awk/php here...
+# rm updates.json
+
+# --- Unused Composer Modules ---
+echo "--- Checking for Composer Modules Not Enabled Anywhere in '$DRUSH_ALIAS_GROUP' ---"
+
+# Define temp files
+composer_modules_file=$(mktemp)
+enabled_modules_file=$(mktemp)
+# Ensure cleanup on exit
+trap 'rm -f "$composer_modules_file" "$enabled_modules_file"' EXIT
+
+# Get Composer modules
+echo "Getting modules from composer.json..."
+if ! composer show --type=drupal-module --no-dev --format=json | jq -r '.[].name | sub("drupal/"; "")' | sort > "$composer_modules_file"; then
+    echo "Error: Failed to get modules from composer.json."
+    # Optionally continue if you want other checks to run
+else
+    echo "Found $(wc -l < "$composer_modules_file") non-dev contrib/custom modules in composer.json."
+fi
+
+# Get Enabled modules across all sites in the specified alias group
+echo "Getting enabled modules from all sites in '$DRUSH_ALIAS_GROUP' via Drush..."
+# Important: Ensure the alias group '$DRUSH_ALIAS_GROUP' is correctly defined in your Drush config!
+if ! "$DRUSH_CMD" "$DRUSH_ALIAS_GROUP" pml --status=enabled --type=module --no-core --fields=machine_name --format=list | sort | uniq > "$enabled_modules_file"; then
+    echo "Warning: Failed to get enabled modules via Drush alias group '$DRUSH_ALIAS_GROUP'."
+    echo "Check Drush alias configuration and site status for all sites in the group."
+    # Decide if you want to exit or continue cautiously
+else
+   echo "Found $(wc -l < "$enabled_modules_file") unique enabled contrib/custom modules across sites in '$DRUSH_ALIAS_GROUP'."
+fi
+
+
+# Compare lists if both files were created successfully
+if [ -f "$composer_modules_file" ] && [ -f "$enabled_modules_file" ]; then
+  echo "Comparing lists..."
+  unused_modules=$(comm -23 "$composer_modules_file" "$enabled_modules_file")
+
+  if [ -z "$unused_modules" ]; then
+      echo "Result: All detected composer drupal-modules (non-dev) appear to be enabled on at least one site in '$DRUSH_ALIAS_GROUP'."
+  else
+      echo "Result: Modules in composer.json (non-dev) but NOT enabled on any site in '$DRUSH_ALIAS_GROUP':"
+      echo "---"
+      echo "$unused_modules"
+      echo "---"
+  fi
+else
+  echo "Warning: Could not perform comparison due to errors fetching module lists."
+fi
+
+echo
+echo "############################################"
+echo "### Check Complete ###"
+echo "############################################"
+
+exit 0

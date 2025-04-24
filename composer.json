@@ -10,7 +10,8 @@
     }
   ],
   "bin": [
-    "scripts/drupal-update-helper"
+    "scripts/composer-update-helper",
+    "scripts/check_modules"
   ],
   "require": {
     "php": ">=7.2"
