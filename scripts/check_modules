@@ -1,10 +1,11 @@
 #!/bin/bash
 
 ################################################################################
-# Drupal Multisite Module Status Check
+# Drupal Multisite Module Status Check (Updated for Modern Drush/Composer)
 #
-# Checks for security updates, general updates, and lists Composer-managed
-# modules that are not enabled on any site within a specified Drush alias group.
+# Checks for security vulnerabilities, general updates, and lists
+# Composer-managed Drupal modules that are not enabled on any site within a
+# specified Drush alias group.
 #
 # Requirements:
 # 1. Run from the Drupal project root directory (where composer.json is).
@@ -13,15 +14,13 @@
 #    Drush configuration (e.g., in `drush/sites/updates.site.yml`). This script
 #    uses the alias group name defined by the environment variable
 #    `DRUSH_MULTISITE_GROUP_ALIAS`, defaulting to '@updates'.
-#    Example `drush/sites/updates.site.yml` entry:
-#      sites:
-#        site-list:
-#          - @updates.site1.local # Replace with your actual local aliases
-#          - @updates.site2.local # Replace with your actual local aliases
 #
 # Usage:
-# ./check_modules
-# ALIAS_GROUP='@my_multisite_group' ./check_modules
+# ./check_modules.sh
+# DRUSH_MULTISITE_GROUP_ALIAS='@my_multisite_group' ./check_modules.sh
+#
+# Note: This script now uses 'composer audit' for security checks and
+# 'composer outdated' for update checks, reflecting modern Drupal practices.
 #
 ################################################################################
 
@@ -36,7 +35,7 @@ echo
 # Use project's Drush binary explicitly
 DRUSH_CMD="vendor/bin/drush"
 # Use environment variable for alias group, default to @updates
-DRUSH_ALIAS_GROUP=${ALIAS_GROUP:-@updates}
+DRUSH_ALIAS_GROUP=${DRUSH_MULTISITE_GROUP_ALIAS:-@updates}
 
 # Check if Drush command exists
 if [ ! -x "$DRUSH_CMD" ]; then
@@ -55,26 +54,25 @@ echo "Using Drush command: $DRUSH_CMD"
 echo "Targeting Drush alias group: $DRUSH_ALIAS_GROUP (Set DRUSH_MULTISITE_GROUP_ALIAS to override)"
 echo
 
-# --- Security Updates ---
-echo "--- Checking Security Updates ---"
-# Using --check-updated to avoid listing already updated items
-if ! "$DRUSH_CMD" pm:security --check-updated --format=table; then
- echo "Warning: Error occurred while checking security updates."
+# --- Security Audit ---
+echo "--- Checking Security Vulnerabilities (composer audit) ---"
+# composer audit returns non-zero exit code if vulnerabilities are found.
+# We capture the output and check the exit code separately.
+audit_output=$(composer audit 2>&1)
+audit_exit_code=$?
+echo "$audit_output"
+if [ $audit_exit_code -ne 0 ]; then
+ echo "Warning: 'composer audit' reported issues (exit code $audit_exit_code)."
 fi
 echo
 
-# --- Minor/Major Updates ---
-echo "--- Checking Minor/Major Updates ---"
-echo "(Requires manual interpretation/parsing for exact Minor vs Major from table)"
-# Using --check-updated to avoid listing already updated items
-if ! "$DRUSH_CMD" pm:update:status --check-updated --format=table; then
-  echo "Warning: Error occurred while checking general updates."
+# --- Available Updates (Minor/Major) ---
+echo "--- Checking Available Updates (composer outdated 'drupal/*') ---"
+echo "(Review versions below to identify Minor vs Major updates)"
+if ! composer outdated 'drupal/*'; then
+  echo "Warning: Error occurred while checking for outdated Drupal packages."
 fi
 echo
-# Optional: Add JSON output and parsing logic here if needed for strict minor/major separation
-# "$DRUSH_CMD" pm:update:status --check-updated --format=json > updates.json
-# Add parsing logic using jq/awk/php here...
-# rm updates.json
 
 # --- Unused Composer Modules ---
 echo "--- Checking for Composer Modules Not Enabled Anywhere in '$DRUSH_ALIAS_GROUP' ---"
@@ -85,42 +83,57 @@ enabled_modules_file=$(mktemp)
 # Ensure cleanup on exit
 trap 'rm -f "$composer_modules_file" "$enabled_modules_file"' EXIT
 
-# Get Composer modules
-echo "Getting modules from composer.json..."
-if ! composer show --type=drupal-module --no-dev --format=json | jq -r '.[].name | sub("drupal/"; "")' | sort > "$composer_modules_file"; then
-    echo "Error: Failed to get modules from composer.json."
+# Get Composer modules (installed, non-dev, drupal/*)
+echo "Getting installed Drupal modules from composer..."
+# List installed, non-dev packages, filter for drupal/, remove prefix, sort.
+if ! composer show --installed --no-dev --name-only | grep '^drupal/' | sed 's/^drupal\///' | sort > "$composer_modules_file"; then
+    echo "Error: Failed to get installed Drupal modules via composer."
     # Optionally continue if you want other checks to run
 else
-    echo "Found $(wc -l < "$composer_modules_file") non-dev contrib/custom modules in composer.json."
+    module_count=$(wc -l < "$composer_modules_file" | tr -d ' ') # Get count, remove whitespace
+    echo "Found $module_count installed non-dev contrib/custom modules via composer."
 fi
 
 # Get Enabled modules across all sites in the specified alias group
 echo "Getting enabled modules from all sites in '$DRUSH_ALIAS_GROUP' via Drush..."
 # Important: Ensure the alias group '$DRUSH_ALIAS_GROUP' is correctly defined in your Drush config!
-if ! "$DRUSH_CMD" "$DRUSH_ALIAS_GROUP" pml --status=enabled --type=module --no-core --fields=machine_name --format=list | sort | uniq > "$enabled_modules_file"; then
+# Adding --pipe flag for simpler output format
+if ! "$DRUSH_CMD" "$DRUSH_ALIAS_GROUP" pm:list --status=enabled --type=module --no-core --fields=name --format=pipe | sort | uniq > "$enabled_modules_file"; then
     echo "Warning: Failed to get enabled modules via Drush alias group '$DRUSH_ALIAS_GROUP'."
     echo "Check Drush alias configuration and site status for all sites in the group."
     # Decide if you want to exit or continue cautiously
 else
-   echo "Found $(wc -l < "$enabled_modules_file") unique enabled contrib/custom modules across sites in '$DRUSH_ALIAS_GROUP'."
+   enabled_count=$(wc -l < "$enabled_modules_file" | tr -d ' ') # Get count, remove whitespace
+   echo "Found $enabled_count unique enabled contrib/custom modules across sites in '$DRUSH_ALIAS_GROUP'."
 fi
 
 
-# Compare lists if both files were created successfully
-if [ -f "$composer_modules_file" ] && [ -f "$enabled_modules_file" ]; then
+# Compare lists if both files were created successfully and composer file is not empty
+if [ -f "$composer_modules_file" ] && [ -s "$composer_modules_file" ] && [ -f "$enabled_modules_file" ]; then
   echo "Comparing lists..."
-  unused_modules=$(comm -23 "$composer_modules_file" "$enabled_modules_file")
-
-  if [ -z "$unused_modules" ]; then
-      echo "Result: All detected composer drupal-modules (non-dev) appear to be enabled on at least one site in '$DRUSH_ALIAS_GROUP'."
+  # comm requires non-empty files for comparison in some versions
+  # Check if enabled_modules file is empty first
+  if [ ! -s "$enabled_modules_file" ]; then
+      echo "Result: No enabled contrib/custom modules found via Drush. All composer modules are considered 'unused':"
+      echo "---"
+      cat "$composer_modules_file"
+      echo "---"
   else
-      echo "Result: Modules in composer.json (non-dev) but NOT enabled on any site in '$DRUSH_ALIAS_GROUP':"
-      echo "---"
-      echo "$unused_modules"
-      echo "---"
+      unused_modules=$(comm -23 "$composer_modules_file" "$enabled_modules_file")
+
+      if [ -z "$unused_modules" ]; then
+          echo "Result: All detected composer drupal-modules (non-dev) appear to be enabled on at least one site in '$DRUSH_ALIAS_GROUP'."
+      else
+          echo "Result: Modules installed via composer (non-dev) but NOT enabled on any site in '$DRUSH_ALIAS_GROUP':"
+          echo "---"
+          echo "$unused_modules"
+          echo "---"
+      fi
   fi
+elif [ -f "$composer_modules_file" ] && [ ! -s "$composer_modules_file" ]; then
+    echo "Result: No installed non-dev Drupal modules found via composer to compare."
 else
-  echo "Warning: Could not perform comparison due to errors fetching module lists."
+  echo "Warning: Could not perform comparison due to errors fetching one or both module lists."
 fi
 
 echo
