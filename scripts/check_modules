@@ -9,7 +9,8 @@
 #
 # Requirements:
 # 1. Run from the Drupal project root directory (where composer.json is).
-# 2. `jq` command-line JSON processor must be installed.
+# 2. `jq` command-line JSON processor must be installed (though not strictly needed
+#    by this version of the script, kept for potential future use).
 # 3. A Drush alias group must be configured for your multisite setup in your
 #    Drush configuration (e.g., in `drush/sites/updates.site.yml`). This script
 #    uses the alias group name defined by the environment variable
@@ -44,11 +45,10 @@ if [ ! -x "$DRUSH_CMD" ]; then
   exit 1
 fi
 
-# Check if jq is installed
-if ! command -v jq &> /dev/null; then
-    echo "Error: jq command-line JSON processor is not installed. Please install jq."
-    exit 1
-fi
+# Check if jq is installed (Optional dependency now, but good practice)
+# if ! command -v jq &> /dev/null; then
+#     echo "Warning: jq command-line JSON processor is not installed. It might be needed for future script versions."
+# fi
 
 echo "Using Drush command: $DRUSH_CMD"
 echo "Targeting Drush alias group: $DRUSH_ALIAS_GROUP (Set DRUSH_MULTISITE_GROUP_ALIAS to override)"
@@ -61,16 +61,22 @@ echo "--- Checking Security Vulnerabilities (composer audit) ---"
 audit_output=$(composer audit 2>&1)
 audit_exit_code=$?
 echo "$audit_output"
+# Exit code 0 means no vulnerabilities, other codes indicate issues or errors.
 if [ $audit_exit_code -ne 0 ]; then
- echo "Warning: 'composer audit' reported issues (exit code $audit_exit_code)."
+ echo "Warning: 'composer audit' reported vulnerabilities or an error (exit code $audit_exit_code)."
 fi
 echo
 
 # --- Available Updates (Minor/Major) ---
 echo "--- Checking Available Updates (composer outdated 'drupal/*') ---"
 echo "(Review versions below to identify Minor vs Major updates)"
+# composer outdated returns 0 if everything is up to date, 1 if updates are available, >1 on error.
 if ! composer outdated 'drupal/*'; then
-  echo "Warning: Error occurred while checking for outdated Drupal packages."
+  # Check exit code specifically for errors (not just outdated packages)
+  outdated_exit_code=$?
+  if [ $outdated_exit_code -gt 1 ]; then
+    echo "Warning: Error occurred while checking for outdated Drupal packages (exit code $outdated_exit_code)."
+  fi
 fi
 echo
 
@@ -85,8 +91,9 @@ trap 'rm -f "$composer_modules_file" "$enabled_modules_file"' EXIT
 
 # Get Composer modules (installed, non-dev, drupal/*)
 echo "Getting installed Drupal modules from composer..."
-# List installed, non-dev packages, filter for drupal/, remove prefix, sort.
-if ! composer show --installed --no-dev --name-only | grep '^drupal/' | sed 's/^drupal\///' | sort > "$composer_modules_file"; then
+# List installed (default), non-dev packages, filter for drupal/, remove prefix, sort.
+# Removed deprecated --installed flag.
+if ! composer show --no-dev --name-only | grep '^drupal/' | sed 's/^drupal\///' | sort > "$composer_modules_file"; then
     echo "Error: Failed to get installed Drupal modules via composer."
     # Optionally continue if you want other checks to run
 else
@@ -97,10 +104,10 @@ fi
 # Get Enabled modules across all sites in the specified alias group
 echo "Getting enabled modules from all sites in '$DRUSH_ALIAS_GROUP' via Drush..."
 # Important: Ensure the alias group '$DRUSH_ALIAS_GROUP' is correctly defined in your Drush config!
-# Adding --pipe flag for simpler output format
-if ! "$DRUSH_CMD" "$DRUSH_ALIAS_GROUP" pm:list --status=enabled --type=module --no-core --fields=name --format=pipe | sort | uniq > "$enabled_modules_file"; then
+# Changed format back to 'list' as 'pipe' was unavailable.
+if ! "$DRUSH_CMD" "$DRUSH_ALIAS_GROUP" pm:list --status=enabled --type=module --no-core --fields=name --format=list | sort | uniq > "$enabled_modules_file"; then
     echo "Warning: Failed to get enabled modules via Drush alias group '$DRUSH_ALIAS_GROUP'."
-    echo "Check Drush alias configuration and site status for all sites in the group."
+    echo "Check Drush alias configuration, site status, and Drush version compatibility for all sites in the group."
     # Decide if you want to exit or continue cautiously
 else
    enabled_count=$(wc -l < "$enabled_modules_file" | tr -d ' ') # Get count, remove whitespace
@@ -114,7 +121,10 @@ if [ -f "$composer_modules_file" ] && [ -s "$composer_modules_file" ] && [ -f "$
   # comm requires non-empty files for comparison in some versions
   # Check if enabled_modules file is empty first
   if [ ! -s "$enabled_modules_file" ]; then
-      echo "Result: No enabled contrib/custom modules found via Drush. All composer modules are considered 'unused':"
+      # This case can happen if Drush failed OR if truly no contrib modules are enabled
+      echo "Result: No enabled contrib/custom modules found via Drush in '$DRUSH_ALIAS_GROUP'."
+      echo "        This could be an error, or it might be correct if no modules are enabled."
+      echo "        Assuming all composer modules are potentially unused:"
       echo "---"
       cat "$composer_modules_file"
       echo "---"
