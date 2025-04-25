@@ -171,9 +171,10 @@ fi
 # 2. Get Extension Types locally using Drush + jq
 if [ "$composer_list_ok" = true ]; then
     echo "Getting extension types locally via Drush..."
-    # Run drush pm:list locally to get types. Assumes local env reflects installed code.
-    if ! drush pm:list --no-core --format=json > "$all_installed_types_json"; then
-        echo "Error: Failed to get local extension types via 'drush pm:list --format=json'."
+    # Run drush pm:list locally using $DRUSH_CMD to get types.
+    # Assumes local env reflects installed code.
+    if ! "$DRUSH_CMD" pm:list --no-core --format=json > "$all_installed_types_json"; then
+        echo "Error: Failed to get local extension types via '$DRUSH_CMD pm:list --format=json'."
     else
         # Use jq to extract module names
         if jq -r 'to_entries[] | select(.value.type == "module") | .key' "$all_installed_types_json" | sort > "$installed_module_names_file"; then
