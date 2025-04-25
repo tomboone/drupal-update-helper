@@ -42,10 +42,11 @@ for alias_file in "$DRUSH_SITES_DIR"/*.site.yml; do
     echo ""
 
     # --- 2. Import Config Split ---
-    # Extract config_split_name using yq
-    config_split_name=$(yq e '.local.config_split_name // ""' "$alias_file") # Use // "" to default to empty string if not found
+    # Extract config_split_name using Python yq (-r for raw output)
+    config_split_name=$(yq -r .local.config_split_name "$alias_file")
 
-    if [ -n "$config_split_name" ]; then
+    # Check if the value is non-empty AND not the literal string "null"
+    if [ -n "$config_split_name" ] && [ "$config_split_name" != "null" ]; then
       echo "Importing config split '$config_split_name' for $local_alias..."
       split_import_cmd="$DRUSH_CMD $local_alias config-split:import $config_split_name"
       echo "Running: $split_import_cmd"
@@ -55,7 +56,8 @@ for alias_file in "$DRUSH_SITES_DIR"/*.site.yml; do
       fi
       echo "Config split import complete for $base_name."
     else
-      echo "No 'config_split_name' found in $alias_file for the local alias. Skipping config split import."
+      # Updated message to reflect the check
+      echo "No 'config_split_name' found or value is null in $alias_file for the local alias. Skipping config split import."
     fi
     echo ""
 
