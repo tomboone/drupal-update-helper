@@ -10,7 +10,7 @@
     }
   ],
   "bin": [
-    "scripts/composer_updates.sh",
+    "scripts/update_modules.sh",
     "scripts/check_modules.sh",
     "scripts/sync_sites.sh"
   ],

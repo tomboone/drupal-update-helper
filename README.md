@@ -42,10 +42,10 @@
 3.  **Execute** the script. If running within Docker, you **must** use flags to allocate an interactive terminal (`-it`):
     ```bash
     # Native environment:
-    vendor/bin/composer_updates.sh.sh
+    vendor/bin/update_modules.sh.sh
 
     # Inside Docker (example):
-    docker exec -it [-e COMPOSER_AUTH='...'] your_container_name vendor/bin/composer_updates.sh.sh
+    docker exec -it [-e COMPOSER_AUTH='...'] your_container_name vendor/bin/update_modules.sh.sh
     ```
     *(Note: Pass `COMPOSER_AUTH` environment variable if GitHub authentication is needed).*
 4.  **Follow Prompts:** The script will guide you through creating a branch and confirming (`y/N`) updates for each detected package not listed in your ignore file.
