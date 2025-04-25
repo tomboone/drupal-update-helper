@@ -176,50 +176,49 @@ main() {
     # --- Load Config ---
     load_pinned_packages
 
-    # --- Initial Report of ALL Outdated Dependencies ---
+# --- Initial Report of ALL Outdated Dependencies ---
     echo # Blank line
-    echo "----- Initial Report: Available Updates -----"
-    echo "Checking for ALL outdated dependencies (including indirect)..."
-    local all_outdated_json
-    # Use --no-dev, but NOT -D for this report
-    if ! all_outdated_json=$(composer outdated --no-dev --format=json); then
-        echo "Error: 'composer outdated' command failed while generating initial report." >&2
-        # Decide if we should exit or try to continue with direct updates only
-        # For now, let's exit as the report is a key feature.
+    echo "----- Initial Report: Available Updates (Direct Dependencies Only) -----"
+    echo "Checking for DIRECTLY required outdated dependencies (excluding dev)..."
+    local direct_outdated_json # Renamed from all_outdated_json
+    # Use --no-dev AND --direct (-D) for this report
+    if ! direct_outdated_json=$(composer outdated --no-dev --direct --format=json); then
+        echo "Error: 'composer outdated --direct' command failed while generating initial report." >&2
         exit 1
     fi
 
-    local all_outdated_packages
+    local direct_outdated_packages # Renamed from all_outdated_packages
     # Select only installed packages that have a name
-    if ! all_outdated_packages=$(echo "$all_outdated_json" | jq -c '.installed[] | select(.name)'); then
+    if ! direct_outdated_packages=$(echo "$direct_outdated_json" | jq -c '.installed[] | select(.name)'); then
          echo "Error: Failed to parse composer output for the initial report using jq." >&2
-         # Optionally print the raw JSON for debugging: echo "$all_outdated_json"
+         # Optionally print the raw JSON for debugging: echo "$direct_outdated_json"
          exit 1
     fi
 
-    if [[ -z "$all_outdated_packages" ]]; then
-        echo "Result: No outdated dependencies found (excluding dev)."
+    if [[ -z "$direct_outdated_packages" ]]; then
+        echo "Result: No outdated *direct* dependencies found (excluding dev)."
         # No need to proceed further if nothing is outdated
         exit 0
     else
-        echo "Found outdated dependencies (excluding dev):"
+        echo "Found outdated direct dependencies (excluding dev):"
         local drupal_updates=()
         local other_updates=()
         local pinned_skipped_count=0
 
         # Process each package line from jq output
         while IFS= read -r pkg_json; do
-            local name version latest latest_status direct
+            local name version latest latest_status # Removed 'direct' and 'description'
             name=$(echo "$pkg_json" | jq -r '.name')
             version=$(echo "$pkg_json" | jq -r '.version')
             latest=$(echo "$pkg_json" | jq -r '.latest')
-            latest_status=$(echo "$pkg_json" | jq -r '.latestStatus') # e.g., "semver-safe-update", "update-possible"
-            direct=$(echo "$pkg_json" | jq -r '."direct-dependency"') # true or false
+            latest_status=$(echo "$pkg_json" | jq -r '.latestStatus // ""') # Use default empty string if null
 
-            local report_line="$name ($version -> $latest) [$latest_status]"
-            if [[ "$direct" == "true" ]]; then
-                report_line+=" [Direct]"
+            local report_line="$name ($version -> $latest)"
+            # Only append latest_status if it's not empty
+            if [[ -n "$latest_status" && "$latest_status" != "null" ]]; then
+                 report_line+=" [$latest_status]"
             fi
+            # Removed the check for 'direct' flag as we only fetch direct ones now
 
             if is_pinned "$name"; then
                 report_line+=" [Pinned/Ignored]"
@@ -231,7 +230,7 @@ main() {
             else
                 other_updates+=("$report_line")
             fi
-        done <<< "$all_outdated_packages" # Use <<< for here-string
+        done <<< "$direct_outdated_packages" # Use <<< for here-string
 
         # Print grouped updates
         if (( ${#drupal_updates[@]} > 0 )); then
