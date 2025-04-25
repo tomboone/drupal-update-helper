@@ -137,29 +137,39 @@ enabled_modules_file=$(mktemp)
 # Ensure cleanup on exit
 trap 'rm -f "$composer_modules_file" "$enabled_modules_file"' EXIT
 
+# Initialize status flags
+module_list_ok=false # Initialize here
+drush_list_ok=false  # Initialize here too for consistency
+
 # Get Composer modules (installed, non-dev, drupal/*)
 echo "Getting installed Drupal modules from composer..."
 if ! composer show --no-dev --name-only | grep '^drupal/' | sed 's/^drupal\///' | sort > "$composer_modules_file"; then
     echo "Error: Failed to get installed Drupal modules via composer."
-    module_list_ok=false
+    # module_list_ok remains false
 else
     module_count=$(wc -l < "$composer_modules_file" | tr -d ' ')
     echo "Found $module_count installed non-dev contrib/custom modules via composer."
-    module_list_ok=true
+    module_list_ok=true # Set to true only on success
 fi
 
 # Proceed only if target aliases were found and composer list is ok
 if [ -n "$TARGET_ALIASES" ] && [ "$module_list_ok" = true ]; then
     # Get Enabled modules across all discovered sites
     echo "Getting enabled modules from discovered aliases ($TARGET_ALIASES) via Drush..."
+    # Pass the alias list BEFORE the pm:list command
     if ! "$DRUSH_CMD" "$TARGET_ALIASES" pm:list --status=enabled --type=module --no-core --fields=name --format=list | sort | uniq > "$enabled_modules_file"; then
         echo "Warning: Failed to get enabled modules via Drush for discovered aliases."
+        echo "         Output of failed command:"
+        # Attempt to run again capturing stderr to show the error
+        "$DRUSH_CMD" "$TARGET_ALIASES" pm:list --status=enabled --type=module --no-core --fields=name --format=list > /dev/null 2>&1
+        drush_list_error_code=$?
+        echo "         (Drush exit code: $drush_list_error_code)"
         echo "         Check Drush alias configuration, site status, and Drush version compatibility."
-        drush_list_ok=false
+        # drush_list_ok remains false
     else
        enabled_count=$(wc -l < "$enabled_modules_file" | tr -d ' ')
        echo "Found $enabled_count unique enabled contrib/custom modules across discovered aliases."
-       drush_list_ok=true
+       drush_list_ok=true # Set to true only on success
     fi
 
     # Compare lists if both files were created successfully and composer file is not empty
