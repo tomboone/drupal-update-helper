@@ -120,31 +120,23 @@ vendor/bin/check_modules.sh.sh --environment=prod
 
 **Configuration (Drush Alias Example):**
 
-The script relies on your existing Drush alias configuration. Ensure your aliases are defined and follow the `.local`/`.prod` suffix convention.
+The script relies on your existing Drush alias configuration. Ensure your aliases are defined and follow the `local`/`prod` convention.
 
 ```yaml
-# Example: drush/sites/self.site.yml
+# Example: drush/sites/site1.site.yml
 
 # Define aliases for individual sites following the convention
-site1.local:
+local:
   root: /var/www/html/my-project/web # Adjust path to your Drupal web root
   uri: site1.dev.local               # URI used locally for site1
+  config_split_name: local_dev_split # Optional: config split for local
+  uses_private_files: true           # Optional: sync private files
 
-site2.local:
-  root: /var/www/html/my-project/web
-  uri: site2.dev.local
-
-site1.prod:
+prod:
   host: prod.server.com
   user: deploy_user
-  root: /var/www/html/my-project/web # Adjust path on production
-  uri: [www.site1.com](https://www.site1.com)                 # Production URI for site1
-
-site2.prod:
-  host: prod.server.com
-  user: deploy_user
-  root: /var/www/html/my-project/web
-  uri: [www.site2.com](https://www.site2.com)
+  root: /var/www/html/my-project/web          # Adjust path on production
+  uri: https://www.site1.com # Production URI for site1
 ```
 
 **Output:**
@@ -155,7 +147,7 @@ The script outputs the following sections:
 2.  **Discovered Aliases:** Lists the specific Drush aliases found matching the target environment pattern.
 3.  **Security Audit:** Output from `composer audit`, highlighting potential vulnerabilities.
 4.  **Available Updates:** Output from `composer outdated 'drupal/*'`, listing Drupal packages with available updates. (Review version numbers to distinguish minor/major).
-5.  **Unused Composer Modules:** A list of module machine names that are:
+5.  **Unused Drupal Modules:** A list of module machine names that are:
     * Required in your `composer.json` (with type `drupal-module`, excluding `require-dev`).
     * *Not* found to be enabled on *any* of the dynamically discovered sites matching the target environment (`.local` or `.prod`).
 
@@ -209,7 +201,8 @@ Run the script from the project root directory, typically inside the Drupal cont
 
 ```bash
 docker exec -it wrlc_drupal vendor/bin/sync_sites.sh
+```
 
- ## License
+## License
 
- This script suite is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This script suite is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
