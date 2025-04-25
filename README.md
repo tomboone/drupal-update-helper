@@ -179,44 +179,36 @@ This script automates the process of synchronizing data and files from a product
 1.  **Drush Alias Files:** Each site pair (production and local) must have its aliases defined in a separate YAML file within the `drush/sites/` directory (e.g., `drush/sites/my_site.site.yml`).
     *   The file name (without `.site.yml`) is used as the base alias name (e.g., `my_site`).
     *   Aliases within the file must be named `local` and `prod` (resulting in Drush aliases like `@my_site.local` and `@my_site.prod`).
-2.  **Config Split Name (Optional):** If the local site uses a specific configuration split that needs to be re-imported after a database sync, add a `config_split_name` key under the `local` alias definition in the corresponding `.site.yml` file.
+2.  **`yq` Utility (Python version):** The script uses the Python-based `yq` command-line YAML processor (which uses path syntax like `.local.key`) to read configuration from alias files. This version is installed via `apt install yq` within the project's `Dockerfile`. Ensure this version is available in the environment where the script runs (the `wrlc_drupal` container).
+3.  **Config Split Name (Optional):** If the local site uses a specific configuration split that needs to be re-imported after a database sync, add a `config_split_name` key under the `local` alias definition in the corresponding `.site.yml` file.
     ```yaml
     # drush/sites/my_site.site.yml
     local:
       uri: http://my_site.local
       root: /path/to/local/web
-      config_split_name: local_dev_split # Add this line
+      config_split_name: local_dev_split # Add this line if needed
+      # ... other local settings
     prod:
       # ... prod config ...
     ```
-3.  **`yq` Utility:** The script uses the `yq` command-line YAML processor to read the `config_split_name` from alias files. Install it if you haven't already (e.g., on macOS: `brew install yq`).
+4.  **Private Files Usage Flag (Optional):** To enable synchronization of private files, add a `uses_private_files` key set to `true` under the `local` alias definition in the corresponding `.site.yml` file. If this key is missing, `false`, or `null`, the private file sync step will be skipped for that site.
+    ```yaml
+    # drush/sites/my_site.site.yml
+    local:
+      uri: http://my_site.local
+      root: /path/to/local/web
+      config_split_name: local_dev_split
+      uses_private_files: true # Add this line to sync private files
+    prod:
+      # ... prod config ...
+    ```
 
 ### Usage
 
-Run the script from the project root directory: 
+Run the script from the project root directory, typically inside the Drupal container:
 
 ```bash
-vendor/bin/sync_sites.sh
-```
-
-### Workflow
-
-The script iterates through each `*.site.yml` file found in `drush/sites/`. For each site, it performs the following steps:
-
-1.  **Database Sync:** Runs `drush sql:sync @site.prod @site.local` to copy the production database to the local environment. It includes `--extra-dump=" | sed '1d'"` to potentially skip the first line of the dump (often a comment or `SET` statement).
-2.  **Config Split Import:** If a `config_split_name` is defined in the local alias, it runs `drush @site.local config-split:import [split_name]` to import the specified configuration split.
-3.  **Public Files Sync:** Runs `drush core:rsync @site.prod:%files @site.local:%files` to synchronize the public files directory.
-4.  **Private Files Sync:** Runs `drush core:rsync @site.prod:%private @site.local:%private` to synchronize the private files directory.
-
-### Interactivity & Error Handling
-
-*   The script does **not** use the `-y` flag with Drush commands. You will be prompted by Drush to confirm each potentially destructive action (database sync, file sync).
-*   If the initial database sync (`sql:sync`) fails for a site, the script will report the error and skip the remaining steps for that specific site, moving on to the next one.
-*   Failures during config split import or public file sync will display a warning, but the script will continue processing the current site.
-*   Failures during the private file sync (`core:rsync ... %private`) are expected for sites that do not use a private file system. The script will note the failure but continue without stopping.
-
----
-
+docker exec -it wrlc_drupal vendor/bin/sync_sites.sh
 
  ## License
 
