@@ -1,7 +1,5 @@
 # Drupal Update Helper Suite
 
-(STILL DEBUGGING. DO NOT USE YET.)
-
  This repository contains a suite of helper scripts designed to assist with common update and maintenance tasks for Composer-managed Drupal projects, particularly focusing on dependency updates and multisite installations.
 
  ---
