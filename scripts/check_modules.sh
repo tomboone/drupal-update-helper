@@ -138,51 +138,97 @@ enabled_modules_file=$(mktemp)
 trap 'rm -f "$composer_modules_file" "$enabled_modules_file"' EXIT
 
 # Initialize status flags
-module_list_ok=false # Initialize here
-drush_list_ok=false  # Initialize here too for consistency
+module_list_ok=false
+drush_list_ok=false
 
 # Get Composer modules (installed, non-dev, drupal/*)
 echo "Getting installed Drupal modules from composer..."
 if ! composer show --no-dev --name-only | grep '^drupal/' | sed 's/^drupal\///' | sort > "$composer_modules_file"; then
     echo "Error: Failed to get installed Drupal modules via composer."
-    # module_list_ok remains false
 else
     module_count=$(wc -l < "$composer_modules_file" | tr -d ' ')
     echo "Found $module_count installed non-dev contrib/custom modules via composer."
-    module_list_ok=true # Set to true only on success
+    module_list_ok=true
 fi
 
+# Get the list of target aliases (newline separated this time)
+echo "Discovering target Drush aliases (ending with .$TARGET_ENV)..."
+all_aliases_output=$("$DRUSH_CMD" site:alias --format=list 2>&1)
+drush_alias_exit_code=$?
+TARGET_ALIAS_LIST=() # Initialize as an array
+
+if [ $drush_alias_exit_code -ne 0 ]; then
+    echo "Error: Failed to list Drush site aliases (Exit code: $drush_alias_exit_code)."
+    echo "$all_aliases_output"
+else
+    # Read matching aliases into the array
+    while IFS= read -r line; do
+        TARGET_ALIAS_LIST+=("$line")
+    done < <(echo "$all_aliases_output" | grep -E "$ALIAS_PATTERN")
+fi
+
+if [ ${#TARGET_ALIAS_LIST[@]} -eq 0 ]; then
+    echo "Warning: No Drush aliases found matching the pattern '$ALIAS_PATTERN'."
+    echo "         Skipping check for unused modules across sites."
+else
+    echo "Targeting dynamically discovered aliases: ${TARGET_ALIAS_LIST[*]}" # Display array elements
+fi
+echo
+
 # Proceed only if target aliases were found and composer list is ok
-if [ -n "$TARGET_ALIASES" ] && [ "$module_list_ok" = true ]; then
-    # Get Enabled modules across all discovered sites
-    echo "Getting enabled modules from discovered aliases ($TARGET_ALIASES) via Drush..."
-    # Pass the alias list BEFORE the pm:list command
-    if ! "$DRUSH_CMD" "$TARGET_ALIASES" pm:list --status=enabled --type=module --no-core --fields=name --format=list | sort | uniq > "$enabled_modules_file"; then
-        echo "Warning: Failed to get enabled modules via Drush for discovered aliases."
-        echo "         Output of failed command:"
-        # Attempt to run again capturing stderr to show the error
-        "$DRUSH_CMD" "$TARGET_ALIASES" pm:list --status=enabled --type=module --no-core --fields=name --format=list > /dev/null 2>&1
-        drush_list_error_code=$?
-        echo "         (Drush exit code: $drush_list_error_code)"
-        echo "         Check Drush alias configuration, site status, and Drush version compatibility."
-        # drush_list_ok remains false
-    else
-       enabled_count=$(wc -l < "$enabled_modules_file" | tr -d ' ')
-       echo "Found $enabled_count unique enabled contrib/custom modules across discovered aliases."
-       drush_list_ok=true # Set to true only on success
+if [ ${#TARGET_ALIAS_LIST[@]} -gt 0 ] && [ "$module_list_ok" = true ]; then
+    # Get Enabled modules across all discovered sites by looping
+    echo "Getting enabled modules from discovered aliases via Drush (one by one)..."
+    # Use 'true' as a no-op command for the redirection
+    true > "$enabled_modules_file" # Clear/create the temp file first
+    drush_list_failed_for_any=false
+
+    for site_alias in "${TARGET_ALIAS_LIST[@]}"; do
+        echo "  Checking alias: $site_alias"
+        # Append enabled modules for this alias to the temp file
+        if ! "$DRUSH_CMD" "$site_alias" pm:list --status=enabled --type=module --no-core --fields=name --format=list >> "$enabled_modules_file"; then
+            echo "  Warning: Failed to get enabled modules via Drush for alias $site_alias. Skipping this alias."
+            # Optionally capture specific error: "$DRUSH_CMD" "$site_alias" pm:list ... > /dev/null 2>&1 ; echo $?
+            drush_list_failed_for_any=true
+        fi
+    done
+
+    # Check if any Drush command failed during the loop
+    if [ "$drush_list_failed_for_any" = true ]; then
+         echo "Warning: Failed to get enabled modules for one or more aliases."
+         # Decide if this constitutes a failure for the whole check
+         # drush_list_ok remains false if we consider partial failure critical
     fi
 
-    # Compare lists if both files were created successfully and composer file is not empty
-    if [ "$drush_list_ok" = true ] && [ -f "$composer_modules_file" ] && [ -s "$composer_modules_file" ] && [ -f "$enabled_modules_file" ]; then
+    # Process the combined list: sort and unique
+    echo "Processing combined list of enabled modules..."
+    sorted_enabled_modules_file=$(mktemp)
+    trap 'rm -f "$composer_modules_file" "$enabled_modules_file" "$sorted_enabled_modules_file"' EXIT # Update trap
+    if sort "$enabled_modules_file" | uniq > "$sorted_enabled_modules_file"; then
+        enabled_count=$(wc -l < "$sorted_enabled_modules_file" | tr -d ' ')
+        echo "Found $enabled_count unique enabled contrib/custom modules across discovered aliases."
+        # Only set drush_list_ok to true if *at least one* alias succeeded *and* the sort/uniq worked
+        if [ "$drush_list_failed_for_any" = false ] || [ "$enabled_count" -gt 0 ]; then
+             drush_list_ok=true
+        fi
+    else
+        echo "Error: Failed to sort/uniq the combined enabled modules list."
+        # drush_list_ok remains false
+    fi
+
+
+    # Compare lists if Drush list processing was successful and composer file is not empty
+    if [ "$drush_list_ok" = true ] && [ -f "$composer_modules_file" ] && [ -s "$composer_modules_file" ] && [ -f "$sorted_enabled_modules_file" ]; then
       echo "Comparing lists..."
-      if [ ! -s "$enabled_modules_file" ]; then
+      if [ ! -s "$sorted_enabled_modules_file" ]; then
           echo "Result: No enabled contrib/custom modules found via Drush on the targeted .$TARGET_ENV aliases."
           echo "        Assuming all composer modules are potentially unused on these sites:"
           echo "---"
           cat "$composer_modules_file"
           echo "---"
       else
-          unused_modules=$(comm -23 "$composer_modules_file" "$enabled_modules_file")
+          # Use the sorted/unique file for comparison
+          unused_modules=$(comm -23 "$composer_modules_file" "$sorted_enabled_modules_file")
           if [ -z "$unused_modules" ]; then
               echo "Result: All detected composer drupal-modules (non-dev) appear to be enabled on at least one targeted .$TARGET_ENV site."
           else
@@ -193,14 +239,14 @@ if [ -n "$TARGET_ALIASES" ] && [ "$module_list_ok" = true ]; then
           fi
       fi
     elif [ "$drush_list_ok" = false ]; then
-        echo "Warning: Could not perform comparison because fetching enabled modules via Drush failed."
+        echo "Warning: Could not perform comparison because fetching or processing enabled modules via Drush failed."
     elif [ -f "$composer_modules_file" ] && [ ! -s "$composer_modules_file" ]; then
         echo "Result: No installed non-dev Drupal modules found via composer to compare."
     else
       echo "Warning: Could not perform comparison due to other errors fetching module lists."
     fi
 else
-    if [ -z "$TARGET_ALIASES" ]; then
+    if [ ${#TARGET_ALIAS_LIST[@]} -eq 0 ]; then
         echo "Skipping comparison: No target aliases ending in .$TARGET_ENV were discovered."
     elif [ "$module_list_ok" = false ]; then
         echo "Skipping comparison: Failed to get module list from composer."
