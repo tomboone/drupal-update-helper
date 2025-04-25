@@ -25,7 +25,7 @@
 #   Lines starting with # and empty lines are ignored.
 #
 # Usage:
-#   From project root: vendor/bin/composer-update-helper
+#   From project root: vendor/bin/composer_updates.sh
 # -----------------------------------------------------------------------------
 
 # --- Configuration ---

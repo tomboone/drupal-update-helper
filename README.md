@@ -42,10 +42,10 @@
 3.  **Execute** the script. If running within Docker, you **must** use flags to allocate an interactive terminal (`-it`):
     ```bash
     # Native environment:
-    vendor/bin/composer-update-helper.sh
+    vendor/bin/composer_updates.sh.sh
 
     # Inside Docker (example):
-    docker exec -it [-e COMPOSER_AUTH='...'] your_container_name vendor/bin/composer-update-helper.sh
+    docker exec -it [-e COMPOSER_AUTH='...'] your_container_name vendor/bin/composer_updates.sh.sh
     ```
     *(Note: Pass `COMPOSER_AUTH` environment variable if GitHub authentication is needed).*
 4.  **Follow Prompts:** The script will guide you through creating a branch and confirming (`y/N`) updates for each detected package not listed in your ignore file.
@@ -88,7 +88,7 @@
 
 ---
 
-## Multisite Module Status Check Script (`bin/check_modules.sh`)
+## Multisite Module Status Check Script (`vendor/bin/check_modules.sh`)
 
 This script provides a command-line utility to assess the status of contributed modules within a Drupal multisite installation managed by Composer, targeting specific environment aliases.
 
@@ -112,13 +112,11 @@ Ensure you are in your Drupal project's root directory. You must specify the tar
 
 ```bash
 # Check modules against aliases ending in .local
-path/to/your/package/bin/check_modules.sh -e local
+vendor/bin/check_modules.sh.sh -e local
 
 # Check modules against aliases ending in .prod
-path/to/your/package/bin/check_modules.sh --environment=prod
+vendor/bin/check_modules.sh.sh --environment=prod
 ```
-
-*(Replace `path/to/your/package/` with the actual path to this script within your vendor directory, e.g., `vendor/your-vendor/your-package/`)*
 
 **Configuration (Drush Alias Example):**
 
@@ -172,66 +170,50 @@ The script relies on the following command-line tools:
 
 ---
 
-## Drupal Prod-to-Local Sync Script (`bin/sync_prod_to_local.sh`)
+## Site Synchronization Script (`vendor/bin/sync_sites.sh`)
 
-This script automates the process of synchronizing Drupal site databases and files from a production environment to a corresponding local environment using Drush aliases. It also re-imports the appropriate configuration split for the local environment after the database sync.
+This script automates the process of synchronizing data and files from a production Drupal site to its corresponding local development site for all sites defined in the `drush/sites/` directory.
 
-**Purpose:**
+### Prerequisites
 
-* **Auto-Discovery:** Automatically finds all configured Drush alias pairs following the pattern `@self.SITE_PREFIX.prod` and `@self.SITE_PREFIX.local`.
-* **Database Sync:** Synchronizes the database from the production alias to the local alias (`drush sql:sync`). Includes a `sed` command to potentially strip problematic header lines from the SQL dump.
-* **Config Split Import:** Retrieves the config split name specified in the local Drush alias (`options.config_import.config_split`) and imports it after the database sync (`drush config-split:import`).
-* **Public Files Sync:** Synchronizes the public files directory (`%files`) from production to local (`drush core:rsync`).
-* **Private Files Sync (Conditional):** Checks if the private files path (`%private`) is defined and accessible on *both* the production and local aliases before attempting to synchronize them. This prevents errors if one or both environments lack a private file system setup.
-* **Error Handling:** Reports errors for each step and continues to the next site if a critical error (like DB sync failure) occurs for the current site. Exits with a non-zero status code if any errors occurred during the entire process.
-
-**Prerequisites:**
-
-1.  **Execution Location:** The script **must** be run from the root directory of your Drupal project (the directory containing your main `composer.json` and `vendor/` directory).
-2.  **Drush Aliases:** Drush aliases **must** be configured (e.g., in `[project-root]/drush/sites/self.site.yml`). Aliases must follow the specific pattern:
-    * `@self.SITE_PREFIX.prod` for production sites.
-    * `@self.SITE_PREFIX.local` for corresponding local sites.
-    * Replace `SITE_PREFIX` with a unique identifier for each site.
-3. **Config Split Definition:** The Drush alias definition for *each* `@self.SITE_PREFIX.local` alias **must** include the relevant config split name under the `options` key, like this:
+1.  **Drush Alias Files:** Each site pair (production and local) must have its aliases defined in a separate YAML file within the `drush/sites/` directory (e.g., `drush/sites/my_site.site.yml`).
+    *   The file name (without `.site.yml`) is used as the base alias name (e.g., `my_site`).
+    *   Aliases within the file must be named `local` and `prod` (resulting in Drush aliases like `@my_site.local` and `@my_site.prod`).
+2.  **Config Split Name (Optional):** If the local site uses a specific configuration split that needs to be re-imported after a database sync, add a `config_split_name` key under the `local` alias definition in the corresponding `.site.yml` file.
     ```yaml
-    # In drush/sites/self.site.yml under the local alias definition
-    options:
-      config_import.config_split: 'local_config_split_name' # Replace with your actual split name
+    # drush/sites/my_site.site.yml
+    local:
+      uri: http://my_site.local
+      root: /path/to/local/web
+      config_split_name: local_dev_split # Add this line
+    prod:
+      # ... prod config ...
     ```
-4.  **`jq`:** The command-line JSON processor `jq` must be installed (`sudo apt install jq` / `brew install jq`).
-5.  **`sed`:** The command-line stream editor `sed` must be available (usually installed by default on Linux/macOS).
+3.  **`yq` Utility:** The script uses the `yq` command-line YAML processor to read the `config_split_name` from alias files. Install it if you haven't already (e.g., on macOS: `brew install yq`).
 
-**Usage:**
+### Usage
 
-Ensure you are in your Drupal project's root directory. Run the script without any arguments. It will automatically find and process all `@self.*.local` / `@self.*.prod` alias pairs.
+Run the script from the project root directory: 
 
 ```bash
-# Run the script
-path/to/your/package/bin/sync_prod_to_local.sh
+vendor/bin/sync_sites.sh
 ```
 
-*(Replace `path/to/your/package/` with the actual path to this script within your vendor directory, e.g., `vendor/your-vendor/your-package/`)*
+### Workflow
 
-**Output:**
+The script iterates through each `*.site.yml` file found in `drush/sites/`. For each site, it performs the following steps:
 
-The script provides detailed output for each site it processes, indicating:
+1.  **Database Sync:** Runs `drush sql:sync @site.prod @site.local` to copy the production database to the local environment. It includes `--extra-dump=" | sed '1d'"` to potentially skip the first line of the dump (often a comment or `SET` statement).
+2.  **Config Split Import:** If a `config_split_name` is defined in the local alias, it runs `drush @site.local config-split:import [split_name]` to import the specified configuration split.
+3.  **Public Files Sync:** Runs `drush core:rsync @site.prod:%files @site.local:%files` to synchronize the public files directory.
+4.  **Private Files Sync:** Runs `drush core:rsync @site.prod:%private @site.local:%private` to synchronize the private files directory.
 
-* Which site prefix is being processed.
-* Verification of found aliases.
-* The config split name being used (or a warning if not found).
-* Status of database sync, config import, public file sync, and private file sync (including checks and skips).
-* Error messages if any command fails.
-* A final summary indicating if any errors occurred during the run.
+### Interactivity & Error Handling
 
-**Dependencies:**
-
-The script relies on the following command-line tools:
-
-* `bash`
-* `drush/drush` (via `vendor/bin/drush`)
-* `jq`
-* `sed`
-* Standard core utilities: `grep`, `mapfile` (Bash 4+), `echo`, `command`, `wc`
+*   The script does **not** use the `-y` flag with Drush commands. You will be prompted by Drush to confirm each potentially destructive action (database sync, file sync).
+*   If the initial database sync (`sql:sync`) fails for a site, the script will report the error and skip the remaining steps for that specific site, moving on to the next one.
+*   Failures during config split import or public file sync will display a warning, but the script will continue processing the current site.
+*   Failures during the private file sync (`core:rsync ... %private`) are expected for sites that do not use a private file system. The script will note the failure but continue without stopping.
 
 ---
 

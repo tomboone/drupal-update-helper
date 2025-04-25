@@ -10,9 +10,9 @@
     }
   ],
   "bin": [
-    "scripts/composer-update-helper",
-    "scripts/check_modules",
-    "scripts/local_sync"
+    "scripts/composer_updates.sh",
+    "scripts/check_modules.sh",
+    "scripts/sync_sites.sh"
   ],
   "require": {
     "php": ">=7.2"

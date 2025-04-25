@@ -14,8 +14,8 @@
 # 3. `jq` command-line JSON processor is no longer strictly needed by this script.
 #
 # Usage:
-# ./check_modules.sh -e local
-# ./check_modules.sh --environment=prod
+# ./check_modules.sh.sh -e local
+# ./check_modules.sh.sh --environment=prod
 #
 # Options:
 #   -e, --environment <env>  Specify the environment suffix ('local' or 'prod'). Required.
