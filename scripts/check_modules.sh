@@ -141,13 +141,14 @@ trap 'rm -f "$composer_modules_file" "$enabled_modules_file"' EXIT
 module_list_ok=false
 drush_list_ok=false
 
-# Get Composer modules (installed, non-dev, drupal/*)
-echo "Getting installed Drupal modules from composer..."
-if ! composer show --no-dev --name-only | grep '^drupal/' | sed 's/^drupal\///' | sort > "$composer_modules_file"; then
+# Get Composer modules (installed, non-dev, drupal/*, excluding drupal/core*)
+echo "Getting installed Drupal modules from composer (excluding core)..."
+# Exclude drupal/core* packages
+if ! composer show --no-dev --name-only | grep '^drupal/' | grep -v '^drupal/core' | sed 's/^drupal\///' | sort > "$composer_modules_file"; then
     echo "Error: Failed to get installed Drupal modules via composer."
 else
     module_count=$(wc -l < "$composer_modules_file" | tr -d ' ')
-    echo "Found $module_count installed non-dev contrib/custom modules via composer."
+    echo "Found $module_count installed non-dev contrib/custom modules via composer (excluding core)."
     module_list_ok=true
 fi
 
@@ -222,7 +223,7 @@ if [ ${#TARGET_ALIAS_LIST[@]} -gt 0 ] && [ "$module_list_ok" = true ]; then
       echo "Comparing lists..."
       if [ ! -s "$sorted_enabled_modules_file" ]; then
           echo "Result: No enabled contrib/custom modules found via Drush on the targeted .$TARGET_ENV aliases."
-          echo "        Assuming all composer modules are potentially unused on these sites:"
+          echo "        Assuming all composer modules (excluding core) are potentially unused on these sites:"
           echo "---"
           cat "$composer_modules_file"
           echo "---"
@@ -230,9 +231,9 @@ if [ ${#TARGET_ALIAS_LIST[@]} -gt 0 ] && [ "$module_list_ok" = true ]; then
           # Use the sorted/unique file for comparison
           unused_modules=$(comm -23 "$composer_modules_file" "$sorted_enabled_modules_file")
           if [ -z "$unused_modules" ]; then
-              echo "Result: All detected composer drupal-modules (non-dev) appear to be enabled on at least one targeted .$TARGET_ENV site."
+              echo "Result: All detected composer drupal-modules (non-dev, excluding core) appear to be enabled on at least one targeted .$TARGET_ENV site."
           else
-              echo "Result: Modules installed via composer (non-dev) but NOT enabled on any targeted .$TARGET_ENV site:"
+              echo "Result: Modules installed via composer (non-dev, excluding core) but NOT enabled on any targeted .$TARGET_ENV site:"
               echo "---"
               echo "$unused_modules"
               echo "---"
@@ -241,7 +242,7 @@ if [ ${#TARGET_ALIAS_LIST[@]} -gt 0 ] && [ "$module_list_ok" = true ]; then
     elif [ "$drush_list_ok" = false ]; then
         echo "Warning: Could not perform comparison because fetching or processing enabled modules via Drush failed."
     elif [ -f "$composer_modules_file" ] && [ ! -s "$composer_modules_file" ]; then
-        echo "Result: No installed non-dev Drupal modules found via composer to compare."
+        echo "Result: No installed non-dev Drupal modules found via composer (excluding core) to compare."
     else
       echo "Warning: Could not perform comparison due to other errors fetching module lists."
     fi
